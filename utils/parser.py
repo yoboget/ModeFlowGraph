@@ -17,7 +17,7 @@ def parse_args():
 
     parser.add_argument(
         "--wandb", type=str,
-        default='no', help="If W&B is online, offline or disabled"
+        default='on', help="If W&B is online, offline or disabled"
     )
 
     parser.add_argument(
