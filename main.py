@@ -30,7 +30,7 @@ def main() -> None:
     config = update_config(config, dataset, work_type, args)
 
     if work_type == 'train':
-        wandb.init(project=f'sid_{dataset}', config=config, mode=args.wandb)
+        wandb.init(project=f'ModeFlowGraph_{dataset}', config=config, mode=args.wandb)
         dataloader = get_dataset(config)
         trainer = Trainer(dataloader, config)
         trainer.train()
