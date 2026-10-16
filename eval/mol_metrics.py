@@ -1,4 +1,5 @@
 from eval.stats3 import eval_graph_list
+import fcd_torch.fcd
 from fcd_torch import FCD
 import pickle
 import torch
@@ -15,6 +16,7 @@ from rdkit.Chem import AllChem, MACCSkeys
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect as Morgan
 from rdkit.Chem.Scaffolds import MurckoScaffold
 import scipy
+import scipy.linalg
 from scipy.spatial.distance import cosine as cos_distance
 
 import re
@@ -25,6 +27,30 @@ RDLogger.DisableLog('rdApp.*')
 # fcd_torch still calls np.row_stack, which newer NumPy releases removed (it was an alias of np.vstack)
 if not hasattr(np, 'row_stack'):
     np.row_stack = np.vstack
+
+
+def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+    """fcd_torch's Frechet distance without `sqrtm(..., disp=False)`, which newer SciPy releases removed."""
+    mu1, mu2 = np.atleast_1d(mu1), np.atleast_1d(mu2)
+    sigma1, sigma2 = np.atleast_2d(sigma1), np.atleast_2d(sigma2)
+    diff = mu1 - mu2
+
+    # product might be almost singular
+    covmean = scipy.linalg.sqrtm(sigma1.dot(sigma2))
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma1.shape[0]) * eps
+        covmean = scipy.linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
+
+    # numerical error might give slight imaginary component
+    if np.iscomplexobj(covmean):
+        if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
+            raise ValueError(f'Imaginary component {np.max(np.abs(covmean.imag))}')
+        covmean = covmean.real
+
+    return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
+
+
+fcd_torch.fcd.calculate_frechet_distance = calculate_frechet_distance
 
 ATOM_VALENCY = {6: 4, 7: 3, 8: 2, 9: 1, 15: 3, 16: 2, 17: 1, 35: 1, 53: 1}
 bond_decoder = {1: Chem.rdchem.BondType.SINGLE, 2: Chem.rdchem.BondType.DOUBLE, 3: Chem.rdchem.BondType.TRIPLE,
