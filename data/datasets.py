@@ -40,7 +40,7 @@ class ZINC(InMemoryDataset):
         else:
             raise NotImplementedError('Choose either train or val or test as split')
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -114,7 +114,7 @@ class KekulizedMolDataset(InMemoryDataset):
             raise NotImplementedError(f'KekulizedMolDataset only supports qm9, got {dataset}')
         self.dataset = dataset
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -167,7 +167,7 @@ class FromNetworkx(InMemoryDataset):
             raise NotImplementedError(f'FromNetworkx only supports enzymes, got {dataset}')
         self.dataset = dataset
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -220,7 +220,7 @@ class SpectreGraphDataset(InMemoryDataset):
         self.dataset_name = dataset_name
         self.split = split
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
@@ -310,7 +310,7 @@ class QM9_(InMemoryDataset):
 
     def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def raw_file_names(self):
