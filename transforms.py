@@ -1,4 +1,3 @@
-from rdkit import Chem
 from torch_geometric.data import Data
 from torch_geometric.transforms import BaseTransform
 
@@ -14,6 +13,6 @@ class Qm9HTransform(BaseTransform):
     def __init__(self):
         super().__init__()
 
-    def __call__(self, data: Data, mol: Chem.rdchem.Mol):
+    def __call__(self, data: Data):
         data.x = data.x[..., :5]
         return data

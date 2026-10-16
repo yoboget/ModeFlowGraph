@@ -151,11 +151,10 @@ def canonicalize_smiles(smiles):
 
 def load_smiles(dataset='qm9'):
     if dataset == 'qm9H':
-        with open(f'./data/qm9H/smiles_qm9_test.pkl', 'rb') as f:
+        with open('./data/qm9H/raw/smiles_qm9H_test.pkl', 'rb') as f:
             test_smiles = pickle.load(f)
             random.Random(42).shuffle(test_smiles)
-        #
-        with open(f'./data/qm9H/smiles_qm9_train.pkl', 'rb') as f:
+        with open('./data/qm9H/raw/smiles_qm9H_train.pkl', 'rb') as f:
             train_smiles = pickle.load(f)
         return train_smiles, test_smiles
     else:

@@ -4,86 +4,104 @@ import torch
 import pickle
 import math
 from torch_geometric.loader import DataLoader
-from utils.utils import batch_to_networkx
+from torch_geometric.utils import to_dense_batch, to_dense_adj
+
+from eval.mol_metrics import gen_mol, mols_to_nx, mols_to_smiles
 
 from transforms import Qm9Transform, Qm9HTransform
 from data.datasets import ZINC, QM9_, KekulizedMolDataset, SpectreGraphDataset, FromNetworkx
 
 def get_dataset(config):
-
-    transforms = None
+    """Returns the train / val / test loaders of `config.dataset`. The test loader yields the whole test set."""
     if config.dataset == 'qm9H':
-        transforms = Qm9HTransform()
-        data = QM9_(f'./data/qm9H', pre_transform=transforms)
+        data = QM9_('./data/qm9H', pre_transform=Qm9HTransform())
         idx = torch.randperm(len(data), generator=torch.Generator().manual_seed(42))
         train_idx, test_idx = idx[10000:], idx[:10000]
+        save_qm9H_references(data[train_idx], data[test_idx])
         train_idx, val_idx = train_idx[config.training.val_size:], train_idx[:config.training.val_size]
         train, val, test = data[train_idx], data[val_idx], data[test_idx]
         test_size = 10_000
 
     elif config.dataset == 'qm9':
-        transforms = Qm9Transform()
-        data = KekulizedMolDataset(f'./data/qm9/', dataset='qm9', pre_transform=transforms)
-        original_train_idx, test_idx = get_indices('qm9', len(data))
-        original_train_idx = original_train_idx[torch.randperm(len(original_train_idx))]
-        val_idx = original_train_idx[:config.log.n_val_samples]
-        train_idx = original_train_idx[config.log.n_val_samples:]
-        train, test, val = data[train_idx], data[test_idx], data[val_idx]
+        data = KekulizedMolDataset('./data/qm9/', dataset='qm9', pre_transform=Qm9Transform())
+        train_idx, test_idx = get_indices('qm9', len(data))
+        train_idx = train_idx[torch.randperm(len(train_idx), generator=torch.Generator().manual_seed(42))]
+        train_idx, val_idx = train_idx[config.log.n_val_samples:], train_idx[:config.log.n_val_samples]
+        train, val, test = data[train_idx], data[val_idx], data[test_idx]
         test_size = 10_000
 
     elif config.dataset == 'zinc':
-        train = ZINC(f'./data/zinc', split= 'train', pre_transform=transforms)
-        val = ZINC(f'./data/zinc', split= 'val', pre_transform=transforms)
-        test = ZINC(f'./data/zinc', split= 'test', pre_transform=transforms)
+        train, val, test = (ZINC('./data/zinc', split=split) for split in ['train', 'val', 'test'])
         test_size = 10_000
 
     elif config.dataset in ['planar', 'sbm']:
-        train = SpectreGraphDataset(config.dataset, f'./data/{config.dataset}', split= 'train',
-                                    pre_transform=transforms)
-        val = SpectreGraphDataset(config.dataset, f'./data/{config.dataset}', split= 'val',
-                                    pre_transform=transforms)
-        test = SpectreGraphDataset(config.dataset, f'./data/{config.dataset}', split= 'test',
-                                    pre_transform=transforms)
+        train, val, test = (SpectreGraphDataset(config.dataset, f'./data/{config.dataset}', split=split)
+                            for split in ['train', 'val', 'test'])
         test_size = len(test)
 
     elif config.dataset == 'enzymes':
-        data = FromNetworkx(f'./data/{config.dataset}', dataset=config.dataset, pre_transform=transforms)
+        data = FromNetworkx(f'./data/{config.dataset}', dataset=config.dataset)
         train_idx, val_idx, test_idx = get_random_split_indices(len(data))
         train, val, test = data[train_idx], data[val_idx], data[test_idx]
         test_size = len(test_idx)
 
-    train_loader = DataLoader(train, batch_size=config.training.batch_size,
-                                  shuffle=True, drop_last=True)
-    val_loader = DataLoader(val, batch_size=config.log.n_val_samples)
-    test_loader = DataLoader(test, shuffle= True, batch_size=test_size, drop_last=False)
+    else:
+        raise NotImplementedError(f'Unknown dataset {config.dataset}')
 
-    loaders = {'train': train_loader, 'val': val_loader, 'test': test_loader}
-    save_test_set(test_loader, config.dataset)
-    return loaders
+    train_loader = DataLoader(train, batch_size=config.training.batch_size, shuffle=True, drop_last=True)
+    val_loader = DataLoader(val, batch_size=config.log.n_val_samples)
+    test_loader = DataLoader(test, shuffle=True, batch_size=test_size, drop_last=False)
+
+    return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
 def get_indices(dataset, n_instances):
-    with open(os.path.join('./data/qm9/raw/', f'test_idx_qm9.json')) as f:
+    """qm9 train / test indices from `./data/qm9/raw/test_idx_qm9.json`."""
+    with open(os.path.join('./data/qm9/raw/', 'test_idx_qm9.json')) as f:
         test_idx = json.load(f)
         if dataset == 'qm9':
             test_idx = test_idx['valid_idxs']
         test_idx = [int(i) for i in test_idx]
 
-    # Create a boolean mask for the training indices
     train_mask = torch.ones(n_instances).bool()
     train_mask[test_idx] = False
     train_idx = torch.arange(n_instances)[train_mask]
 
     return train_idx, test_idx
 
-def save_test_set(test_loader, dataset):
-    filepath = f'./data/{dataset}/test_graph.pkl'
-    if not os.path.exists(filepath):
-        test_batch = next(iter(test_loader))
-        if dataset in ['zinc', 'qm9']:
-            test_batch.x = test_batch.x.argmax(-1, keepdims=True)
-        test_graphs = batch_to_networkx(test_batch)
-        with open(f'./data/{dataset}/test_graph.pkl', 'wb') as f:
-            pickle.dump(test_graphs, f)
+def save_qm9H_references(train, test):
+    """
+    Saves the references used to evaluate qm9H samples (once): the SMILES of the training (incl. validation) and
+    test molecules, and the test molecules as networkx graphs. The molecules are rebuilt from their graphs in the
+    same way as generated graphs (eval.mol_metrics.gen_mol).
+    """
+    raw_dir = './data/qm9H/raw'
+    paths = {name: os.path.join(raw_dir, f'{name}.pkl')
+             for name in ['smiles_qm9H_train', 'smiles_qm9H_test', 'test_nx_qm9H']}
+    if all(os.path.exists(path) for path in paths.values()):
+        return
+
+    print('Building the qm9H evaluation references...')
+    train_mols, test_mols = graphs_to_mols(train), graphs_to_mols(test)
+    to_save = {'smiles_qm9H_train': mols_to_smiles(train_mols),
+               'smiles_qm9H_test': mols_to_smiles(test_mols),
+               'test_nx_qm9H': mols_to_nx(test_mols)}
+    for name, obj in to_save.items():
+        with open(paths[name], 'wb') as f:
+            pickle.dump(obj, f)
+
+
+def graphs_to_mols(dataset, batch_size=1024):
+    """Rebuilds the (qm9H) molecules of a dataset from their graphs."""
+    mols = []
+    for batch in DataLoader(dataset, batch_size=batch_size):
+        x, mask = to_dense_batch(batch.x, batch.batch)
+        adj = to_dense_adj(batch.edge_index, batch.batch, edge_attr=batch.edge_attr)
+        x = x[..., :5].argmax(-1)
+        bonds = adj.argmax(-1) + 1  # 0: no bond, 1: single, 2: double, 3: triple
+        bonds[adj.sum(-1) == 0] = 0
+        mols += gen_mol(x, bonds, mask, dataset='qm9H')[0]
+    return mols
+
 
 def get_random_split_indices(n_instances: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
