@@ -22,6 +22,10 @@ from rdkit import Chem, RDLogger, rdBase
 
 RDLogger.DisableLog('rdApp.*')
 
+# fcd_torch still calls np.row_stack, which newer NumPy releases removed (it was an alias of np.vstack)
+if not hasattr(np, 'row_stack'):
+    np.row_stack = np.vstack
+
 ATOM_VALENCY = {6: 4, 7: 3, 8: 2, 9: 1, 15: 3, 16: 2, 17: 1, 35: 1, 53: 1}
 bond_decoder = {1: Chem.rdchem.BondType.SINGLE, 2: Chem.rdchem.BondType.DOUBLE, 3: Chem.rdchem.BondType.TRIPLE,
                 4: Chem.rdchem.BondType.AROMATIC}
