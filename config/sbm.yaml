@@ -1,0 +1,38 @@
+
+data:
+  max_num_nodes: 200
+
+training:
+  batch_size: 40
+  learning_rate: 0.0002
+  epochs: 100_000
+  val_size: 40
+
+model:
+  architecture: 'GPS'
+  nhf: 256
+  edge_node_ratio: 2
+  n_layers: 8
+  mlp_n_layers: 3
+  normalization: layer_norm
+  T: 512
+  prior: marginal # 'marginal' or 'masking'
+
+extra_features:
+  spectral_embeddings: True
+  k: 5
+  graph_size: True
+  molecular_feat: False
+  cycles: False
+  rrwp: False
+  rrwp_k: 0
+
+sampling:
+  id: 'sid'
+
+log:
+  n_loggin_steps: 1000
+  n_loggin_epochs: 500
+  n_val_samples: 32
+  sampling_batch_size: 40
+  n_samples_generation: 40
