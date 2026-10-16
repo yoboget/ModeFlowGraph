@@ -3,7 +3,7 @@ data:
   max_num_nodes: 38
 
 training:
-  batch_size: 512
+  batch_size: 256
   learning_rate: 0.0005
   epochs: 1000
   val_size: 100
@@ -32,7 +32,7 @@ sampling:
 
 log:
   n_loggin_steps: 1000
-  n_loggin_epochs: 5
+  n_loggin_epochs: 1
   n_val_samples: 1000
   sampling_batch_size: 1000
   n_samples_generation: 10000
