@@ -237,6 +237,8 @@ class GraphTransformer(nn.Module):
     ):
         super().__init__()
         n_layers = config.model.n_layers
+        # num_modes > 1: M node / edge predictions and a graph-level mode head (see utils/modes.py)
+        self.num_modes = config.model.get('num_modes', 1)
         self.out_dim_X = nnf_out
         self.out_dim_E = nef_out
         nhfe = int(nhf/config.model.edge_node_ratio)
@@ -280,14 +282,17 @@ class GraphTransformer(nn.Module):
         self.mlp_out_X = nn.Sequential(
             nn.Linear(nhf, nhf),
             act_fn_out,
-            nn.Linear(nhf, nnf_out),
+            nn.Linear(nhf, nnf_out * self.num_modes),
         )
 
         self.mlp_out_E = nn.Sequential(
             nn.Linear(nhfe, nhfe),
             act_fn_out,
-            nn.Linear(nhfe, nef_out),
+            nn.Linear(nhfe, nef_out * self.num_modes),
         )
+
+        if self.num_modes > 1:
+            self.mode_head = nn.Sequential(nn.Linear(nhfe, nhfe), act_fn_out, nn.Linear(nhfe, self.num_modes))
 
     def forward(self, X, E, node_mask):
         bs, n = X.shape[0], X.shape[1]
@@ -320,12 +325,17 @@ class GraphTransformer(nn.Module):
         X = self.mlp_out_X(X)
         E = self.mlp_out_E(E)
 
-        X = X + X_to_out
-        E = (E + E_to_out) * diag_mask
+        if self.num_modes == 1:
+            X = X + X_to_out
+            E = (E + E_to_out) * diag_mask
+            E = 1 / 2 * (E + torch.transpose(E, 1, 2))
+            return X, E
 
+        M = self.num_modes
+        X = X.view(bs, n, M, -1) + X_to_out.unsqueeze(-2)
+        E = (E.view(bs, n, n, M, -1) + E_to_out.unsqueeze(-2)) * diag_mask.unsqueeze(-1)
         E = 1 / 2 * (E + torch.transpose(E, 1, 2))
-
-        return X, E
+        return self.mode_head(y), X, E
 
 
 def timestep_embedding(timesteps, dim, max_period=10000):

@@ -8,6 +8,8 @@ class DenseGNN(nn.Module):
     def __init__(self, config, nnf_in, nef_in, nnf_out, nef_out, nhf, norm_out=False):
         super().__init__()
         self.sizes = (nnf_in, nef_in, nnf_out, nef_out, nhf)
+        # num_modes > 1: M node / edge predictions and a graph-level mode head (see utils/modes.py)
+        self.num_modes = config.model.get('num_modes', 1)
 
         self.normalization = config.model.normalization
         mlp_n_layers = config.model.mlp_n_layers
@@ -15,7 +17,9 @@ class DenseGNN(nn.Module):
         fact = config.model.edge_node_ratio
 
         self.linear_in_x = nn.Sequential(nn.Linear(nnf_in, nhf), nn.ReLU(), nn.Linear(nhf, nhf))
-        self.linear_out_x = nn.Sequential(nn.Linear(nhf, nhf), nn.ReLU(), nn.Linear(nhf, nnf_out))
+        self.linear_out_x = nn.Sequential(nn.Linear(nhf, nhf), nn.ReLU(), nn.Linear(nhf, nnf_out * self.num_modes))
+        if self.num_modes > 1:
+            self.mode_head = nn.Sequential(nn.Linear(nhf, nhf), nn.ReLU(), nn.Linear(nhf, self.num_modes))
 
         n_layers = config.model.n_layers
         layers = []
@@ -27,7 +31,7 @@ class DenseGNN(nn.Module):
             attention_layers.append(torch.nn.MultiheadAttention(nhf, 16, batch_first=True))
 
         self.linear_in_e = nn.Linear(nef_in, int(nhf / fact))
-        self.linear_out_e = nn.Linear(int(nhf / fact), nef_out)
+        self.linear_out_e = nn.Linear(int(nhf / fact), nef_out * self.num_modes)
         self.layers = nn.Sequential(*layers)
         self.attention_layers = nn.Sequential(*attention_layers)
 
@@ -60,7 +64,14 @@ class DenseGNN(nn.Module):
             else:
                 X = self.node_norm(X)
 
+        H = X
         X = self.linear_out_x(X)
         A = self.linear_out_e(A)
         A = (A + A.transpose(1, 2)) * 0.5
-        return X, A
+        if self.num_modes == 1:
+            return X, A
+        bs, n = X.shape[:2]
+        # mode head on the mean of the node embeddings over the existing nodes
+        m = mask.unsqueeze(-1).float()
+        mode_logits = self.mode_head((H * m).sum(1) / m.sum(1).clamp_min(1))
+        return mode_logits, X.view(bs, n, self.num_modes, -1), A.view(bs, n, n, self.num_modes, -1)

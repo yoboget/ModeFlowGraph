@@ -25,4 +25,20 @@ def parse_args():
         default=None, help="Path to the model directory"
     )
 
+    parser.add_argument(
+        "--num_modes", type=int,
+        default=8, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
+    )
+
+    parser.add_argument(
+        "--hyp_loss", type=str, choices=['wta', 'mixture'],
+        default='mixture', help="num_modes > 1: winner-take-all + commitment loss, or the likelihood of the mixture"
+    )
+
+    parser.add_argument(
+        "--hyp_selection", type=str, choices=['sample', 'average'],
+        default='sample', help="num_modes > 1: sample one mode per graph at each step, or use the expectation "
+                               "of the mixture (recovers the standard formulation)"
+    )
+
     return parser.parse_args()

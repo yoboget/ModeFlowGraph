@@ -13,12 +13,13 @@ import torch
 from torch.distributions.categorical import Categorical
 
 from utils.func import get_edge_mask
+from utils.modes import select_mode
 from utils.noising import MarginalUniformTransition, sample_nodes, sample_edges
 
 
 class Sampler:
     def __init__(self, noiser, extra_features, num_nodes_distribution, max_num_nodes, n_node_types,
-                 batch_size, device):
+                 batch_size, device, hyp_selection='sample'):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedules and the number of steps T.
@@ -26,6 +27,8 @@ class Sampler:
             num_nodes_distribution: (max_num_nodes + 1,) distribution of the number of nodes.
             n_node_types: number of node types (1 for graphs without node types).
             batch_size: number of graphs generated in parallel.
+            hyp_selection: multi-mode denoiser only, 'sample' one mode per graph at each step or use the
+                'average' of the mixture (see utils/modes.py).
         """
         self.noiser = noiser
         self.T = noiser.T
@@ -35,6 +38,7 @@ class Sampler:
         self.has_node_types = n_node_types > 1
         self.batch_size = batch_size
         self.device = device
+        self.hyp_selection = hyp_selection
 
         self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
         self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
@@ -178,7 +182,10 @@ class Sampler:
         """Denoiser prediction p(G_0 | G_t), as probabilities over the data classes."""
         x_in = self.noiser.add_noise_level(x_t, alpha_bar)
         x_in, a_in = self.extra_features(x_in, a_t, node_mask)
-        x_logits, a_logits = self.model(x_in, a_in, node_mask)
+        out = self.model(x_in, a_in, node_mask)
+        if len(out) == 3:  # multi-mode denoiser
+            return select_mode(out, self.hyp_selection)
+        x_logits, a_logits = out
 
         p_x = x_logits.softmax(-1)
         if a_logits.size(-1) == 1:

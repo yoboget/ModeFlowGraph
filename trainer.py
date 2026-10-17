@@ -8,6 +8,7 @@ from torch_geometric.data import Batch
 from utils.extra_feat import ExtraFeatures
 from utils.noising import NoiserDense, get_distribution
 from utils.func import batch_to_dense, get_edge_mask
+from utils.modes import mode_loss
 from utils.node_distribution import get_num_nodes_distribution
 from eval.metrics import SamplingMetrics
 from models.loaders import load_denoiser
@@ -27,6 +28,8 @@ class Trainer:
         self.loaders = loaders
         self.extra_features = ExtraFeatures(config)
         self.prior = config.model.prior
+        self.num_modes = config.model.get('num_modes', 1)
+        self.hyp_loss = config.model.get('hyp_loss', 'wta')
 
         ### LOAD MODELS ###
         self.denoiser, self.opt = load_denoiser(config, loaders, self.extra_features, self.device,
@@ -39,7 +42,8 @@ class Trainer:
         self.max_num_nodes = config.data.max_num_nodes
 
         # Define Logger
-        self.metrics = RunningMetric(['loss', 'node', 'edge'])
+        # 'mode': commitment loss (wta) or responsibility entropy (mixture), 0 with a single mode
+        self.metrics = RunningMetric(['loss', 'node', 'edge', 'mode'])
 
         self.n_logging_steps = config.log.n_loggin_steps
         self.n_logging_epochs = config.log.n_loggin_epochs
@@ -53,7 +57,7 @@ class Trainer:
         num_nodes_distribution = get_num_nodes_distribution(self.loaders, self.max_num_nodes, config.dataset)
         self.sampler = Sampler(self.noiser, self.extra_features, num_nodes_distribution, self.max_num_nodes,
                                n_node_types=len(node_marginals), batch_size=config.log.sampling_batch_size,
-                               device=self.device)
+                               device=self.device, hyp_selection=config.sampling.get('hyp_selection', 'sample'))
 
         ref_loader = self.loaders['test'] if self.sampling else self.loaders['val']
         self.eval_samples = SamplingMetrics(config.dataset, self.max_num_nodes, self.sampling, ref_loader=ref_loader)
@@ -105,7 +109,21 @@ class Trainer:
         X_in, A_in = self.extra_features(X_in, A_noisy, mask)
 
         model = self.denoiser if train else self.denoiser_ema
-        X_pred, A_pred = model(X_in, A_in, mask)
+        out = model(X_in, A_in, mask)
+
+        if self.num_modes > 1:
+            # each edge enters the likelihood once; with masking, only the masked elements are predicted
+            edge_weight = adj_mask.triu(1)
+            node_weight = mask if X.size(-1) > 1 else None
+            if self.prior == 'masking':
+                edge_weight = edge_weight & noised_edges
+                if node_weight is not None:
+                    node_weight = node_weight & noised_nodes
+            loss, loss_x, loss_a, loss_mode = mode_loss(out, X, A.float(), node_weight, edge_weight, self.hyp_loss)
+            self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), loss_mode.item()], train)
+            return
+
+        X_pred, A_pred = out
 
         X_pred = X_pred[mask]
         X_targ = X[mask]
@@ -134,12 +152,13 @@ class Trainer:
             loss = loss_a
             loss_x = torch.zeros(1, dtype=X_targ.dtype, device=X_targ.device)
 
+        self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), 0.], train)
+
+    def optimize(self, loss, to_log, train):
         if train:
             loss.backward()
             self.opt.step()
             update_ema(self.denoiser, self.denoiser_ema)
-
-        to_log = [loss.item(), loss_x.item(), loss_a.item()]
         self.metrics.step(to_log, train)
 
     def save_model(self, to_save, metrics, loss, ema=False):
