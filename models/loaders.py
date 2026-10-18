@@ -48,7 +48,8 @@ def load_denoiser(config, loader, extra_features, device, prior,
 
 def load_trained_model(model, model_name, model_dir, filename, device):
     model_path = os.path.join(model_dir, filename)
-    saved_model = torch.load(model_path, map_location=device)
+    # our own checkpoints: older ones store the metric as a numpy scalar, which weights_only=True rejects
+    saved_model = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(saved_model[model_name])
     return model
 

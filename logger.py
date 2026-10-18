@@ -72,6 +72,6 @@ def save_model(metric, best_run, to_save, step, save_name,
             'iteration': step,
             'denoiser': denoiser.state_dict(),
             'optimizer': opt.state_dict(),
-            'metric': best_run[save_name]},
+            'metric': float(best_run[save_name])},
             os.path.join(save_dir, f'best_run_{save_name}.pt'))
     return best_run
