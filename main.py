@@ -41,7 +41,7 @@ def main() -> None:
         wandb.init(project=f'sid_{dataset}_sample', config=config, mode=args.wandb)
         times = []
 
-        for r in [16, 32, 64, 128, 256, 512]:  # sweep over the number of sampling steps T
+        for r in [4, 8, 16, 32, 64, 128]:  # sweep over the number of sampling steps T
             config.model.T = r
             dataloader = get_dataset(config)
             trainer = Trainer(dataloader, config)
