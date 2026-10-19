@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset", type=str,
-        default='zinc',
+        default='qm9',
         help="Name of the dataset. Available: qm9, qm9H, zinc, planar, sbm, enzymes"
     )
 
@@ -17,7 +17,7 @@ def parse_args():
 
     parser.add_argument(
         "--wandb", type=str,
-        default='on', help="If W&B is online, offline or disabled"
+        default='no', help="If W&B is online, offline or disabled"
     )
 
     parser.add_argument(
@@ -37,7 +37,7 @@ def parse_args():
 
     parser.add_argument(
         "--mi_weight", type=float,
-        default=0.5, help="num_modes > 1: weight lam of the regularizer -lam * (H(k) - H(k | G_0)), which rewards "
+        default=0.0, help="num_modes > 1: weight lam of the regularizer -lam * (H(k) - H(k | G_0)), which rewards "
                          "confident responsibilities and a balanced usage of the modes"
     )
 

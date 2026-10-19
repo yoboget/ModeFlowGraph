@@ -3,7 +3,7 @@ data:
   max_num_nodes: 9
 
 training:
-  batch_size: 2048
+  batch_size: 256
   learning_rate: 0.0005
   epochs: 1000
   val_size: 1000
