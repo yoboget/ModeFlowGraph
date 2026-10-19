@@ -37,13 +37,13 @@ def parse_args():
 
     parser.add_argument(
         "--mi_weight", type=float,
-        default=0., help="num_modes > 1: weight lam of the regularizer -lam * (H(k) - H(k | G_0)), which rewards "
+        default=0.5, help="num_modes > 1: weight lam of the regularizer -lam * (H(k) - H(k | G_0)), which rewards "
                          "confident responsibilities and a balanced usage of the modes"
     )
 
     parser.add_argument(
         "--div_weight", type=float,
-        default=0., help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
+        default=0.05, help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
                          "modes' predictions per element (pushes the modes to specialize)"
     )
 
