@@ -30,6 +30,8 @@ class Trainer:
         self.prior = config.model.prior
         self.num_modes = config.model.get('num_modes', 1)
         self.hyp_loss = config.model.get('hyp_loss', 'wta')
+        self.mi_weight = config.model.get('mi_weight', 0.)
+        self.div_weight = config.model.get('div_weight', 0.)
 
         ### LOAD MODELS ###
         self.denoiser, self.opt = load_denoiser(config, loaders, self.extra_features, self.device,
@@ -42,8 +44,10 @@ class Trainer:
         self.max_num_nodes = config.data.max_num_nodes
 
         # Define Logger
-        # 'mode': commitment loss (wta) or responsibility entropy (mixture), 0 with a single mode
-        self.metrics = RunningMetric(['loss', 'node', 'edge', 'mode'])
+        # num_modes > 1 (0 otherwise): 'mode': commitment loss (wta) or responsibility entropy (mixture),
+        # 'mi': I(k; G_0) with tempered responsibilities, 'div': mean divergence between the modes per element
+        self.metric_names = ['loss', 'node', 'edge', 'mode', 'mi', 'div']
+        self.metrics = RunningMetric(self.metric_names)
 
         self.n_logging_steps = config.log.n_loggin_steps
         self.n_logging_epochs = config.log.n_loggin_epochs
@@ -119,8 +123,10 @@ class Trainer:
                 edge_weight = edge_weight & noised_edges
                 if node_weight is not None:
                     node_weight = node_weight & noised_nodes
-            loss, loss_x, loss_a, loss_mode = mode_loss(out, X, A.float(), node_weight, edge_weight, self.hyp_loss)
-            self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), loss_mode.item()], train)
+            loss, metrics = mode_loss(out, X, A.float(), node_weight, edge_weight, self.hyp_loss,
+                                      self.mi_weight, self.div_weight, noise_level=1 - alpha_bar)
+            metrics['loss'] = loss.item()
+            self.optimize(loss, [metrics[name] for name in self.metric_names], train)
             return
 
         X_pred, A_pred = out
@@ -152,7 +158,7 @@ class Trainer:
             loss = loss_a
             loss_x = torch.zeros(1, dtype=X_targ.dtype, device=X_targ.device)
 
-        self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), 0.], train)
+        self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), 0., 0., 0.], train)
 
     def optimize(self, loss, to_log, train):
         if train:

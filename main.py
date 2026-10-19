@@ -93,6 +93,8 @@ def update_config(config, dataset, work_type, args):
     config.denoiser_dir = args.denoiser_dir
     config.model.num_modes = args.num_modes
     config.model.hyp_loss = args.hyp_loss
+    config.model.mi_weight = args.mi_weight
+    config.model.div_weight = args.div_weight
     config.sampling.hyp_selection = args.hyp_selection
     return config
 
