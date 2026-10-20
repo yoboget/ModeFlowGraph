@@ -213,15 +213,24 @@ def orca(graph):
     for u, v in edge_list_reindexed(graph):
         f.write(str(u) + " " + str(v) + "\n")
     f.close()
-    output = sp.check_output(
-        [
-            str(os.path.join(os.path.dirname(os.path.realpath(__file__)), "orca/orca")),
-            "node",
-            "4",
-            tmp_fname,
-            "std",
-        ]
-    )
+    try:
+        output = sp.check_output(
+            [
+                str(os.path.join(os.path.dirname(os.path.realpath(__file__)), "orca/orca")),
+                "node",
+                "4",
+                tmp_fname,
+                "std",
+            ],
+            stderr=sp.PIPE,
+        )
+    except sp.CalledProcessError as e:
+        raise RuntimeError(f'orca failed: {e.stderr.decode().strip()}') from None
+    finally:  # also when orca fails, otherwise the input files pile up in eval/orca
+        try:
+            os.remove(tmp_fname)
+        except OSError:
+            pass
     output = output.decode("utf8").strip()
     idx = output.find(COUNT_START_STR) + len(COUNT_START_STR) + 2
     output = output[idx:]
@@ -231,11 +240,6 @@ def orca(graph):
             for node_cnts in output.strip("\n").split("\n")
         ]
     )
-
-    try:
-        os.remove(tmp_fname)
-    except OSError:
-        pass
 
     return node_orbit_counts
 

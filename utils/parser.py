@@ -50,7 +50,7 @@ def parse_args():
 
     parser.add_argument(
         "--div_weight", type=float,
-        default=0.005, help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
+        default=0.0, help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
                          "modes' predictions per element (pushes the modes to specialize)"
     )
 
