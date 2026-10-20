@@ -12,6 +12,10 @@ except ImportError:
     GT = False
 
 
+# MMD kernel of the generic graph statistics, following the protocol under which each dataset is usually reported
+MMD_KERNELS = {'enzymes': 'emd', 'planar': 'tv', 'sbm': 'tv'}
+
+
 class SamplingMetrics:
     def __init__(self, dataset, max_num_nodes, sampling, ref_loader=None, ref_size=None):
         """ref_size: if given, the test reference is a random subset of this size (default: the whole test set)."""
@@ -56,7 +60,8 @@ class SamplingMetrics:
                           ref_size=self.ref_size)
 
     def generic_graph_metrics(self, gen_graphs, dataset):
-        metrics = eval_graph_list(self.ref_graphs, gen_graphs, methods=['degree', 'cluster', 'orbit', 'spectral'])
+        metrics = eval_graph_list(self.ref_graphs, gen_graphs, methods=['degree', 'cluster', 'orbit', 'spectral'],
+                                  kernel=MMD_KERNELS[dataset])
         avg = sum(metrics.values()) / len(metrics.values())
         metrics['avg'] = avg
         if dataset == 'planar':

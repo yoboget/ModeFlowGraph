@@ -247,21 +247,22 @@ def orbit_stats_all(graph_ref_list, graph_pred_list, KERNEL='tv'):
         G for G in graph_pred_list if not G.number_of_nodes() == 0
     ]
 
-    for G in graph_ref_list:
-        try:
-            orbit_counts = orca(G)
-        except:
-            continue
-        orbit_counts_graph = np.sum(orbit_counts, axis=0) / G.number_of_nodes()
-        total_counts_ref.append(orbit_counts_graph)
-
-    for G in graph_pred_list_remove_empty:
-        try:
-            orbit_counts = orca(G)
-        except:
-            continue
-        orbit_counts_graph = np.sum(orbit_counts, axis=0) / G.number_of_nodes()
-        total_counts_pred.append(orbit_counts_graph)
+    n_failed = 0
+    for graphs, total_counts in [(graph_ref_list, total_counts_ref), (graph_pred_list_remove_empty, total_counts_pred)]:
+        for G in graphs:
+            try:
+                orbit_counts = orca(G)
+            except Exception as e:
+                n_failed += 1
+                last_error = e
+                continue
+            total_counts.append(np.sum(orbit_counts, axis=0) / G.number_of_nodes())
+    if n_failed > 0:
+        print(f'WARNING: orca failed on {n_failed} graphs, last error: {last_error!r}')
+    if len(total_counts_ref) == 0 or len(total_counts_pred) == 0:
+        # the MMD of empty sets is 0, which would read as a perfect score
+        print('WARNING: no orbit counts (is eval/orca/orca compiled for this machine?), orbit MMD set to nan')
+        return float('nan')
 
     total_counts_ref = np.array(total_counts_ref)
     total_counts_pred = np.array(total_counts_pred)
@@ -422,7 +423,12 @@ METHOD_NAME_TO_FUNC = {
 
 
 # -------- Evaluate generated generic graphs --------
-def eval_graph_list(graph_ref_list, graph_pred_list, methods=None, kernels=None):
+def eval_graph_list(graph_ref_list, graph_pred_list, methods=None, kernel='emd'):
+    """
+    kernel: MMD kernel of the degree / cluster / orbit / spectral statistics,
+        'emd': Gaussian EMD kernel, and a Gaussian kernel on the orbit counts (GraphRNN / GDSS protocol, e.g. enzymes),
+        'tv':  Gaussian total-variation kernel (GRAN / SPECTRE protocol, e.g. planar and sbm).
+    """
     if methods is None:
         methods = ['degree', 'cluster', 'orbit', 'spectral']
     results = {}
@@ -440,7 +446,7 @@ def eval_graph_list(graph_ref_list, graph_pred_list, methods=None, kernels=None)
             print(f'{"V.U.N.":10s}' + ' : ' + f'{results["V.U.N."]:.6f}')
         else:
             if method in ['degree', 'cluster', 'orbit', 'spectral']:  # MMD requires kernel
-                result = METHOD_NAME_TO_FUNC[method](graph_ref_list, graph_pred_list, KERNEL='emd')
+                result = METHOD_NAME_TO_FUNC[method](graph_ref_list, graph_pred_list, KERNEL=kernel)
             else:
                 result = METHOD_NAME_TO_FUNC[method](graph_ref_list, graph_pred_list)
             results[method] = round(result, NUM)
