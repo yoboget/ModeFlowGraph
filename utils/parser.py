@@ -28,7 +28,7 @@ def parse_args():
 
     parser.add_argument(
         "--num_modes", type=int,
-        default=32, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
+        default=1, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
     )
 
     parser.add_argument(
