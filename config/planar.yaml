@@ -3,7 +3,7 @@ data:
   max_num_nodes: 64
 
 training:
-  batch_size: 16
+  batch_size: 128
   learning_rate: 0.0001
   epochs: 100_000
   val_size: 40
@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 0
 
 sampling:
-  id: 'dfm'
+  id: 'sid'
 
 log:
   n_loggin_steps: 1000

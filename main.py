@@ -42,7 +42,7 @@ def main() -> None:
     elif work_type == 'sample':
         torch.manual_seed(42)
         runs = []
-        wandb.init(project=f'sid_{dataset}_sample', config=config, mode=args.wandb)
+        wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb)
         times = []
 
         for r in [4, 8, 16, 32, 64, 128]:  # sweep over the number of sampling steps T
