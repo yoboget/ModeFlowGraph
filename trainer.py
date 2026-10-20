@@ -30,6 +30,7 @@ class Trainer:
         self.prior = config.model.prior
         self.num_modes = config.model.get('num_modes', 1)
         self.hyp_loss = config.model.get('hyp_loss', 'wta')
+        self.hyp_temperature = config.model.get('hyp_temperature', 1.)
         self.mi_weight = config.model.get('mi_weight', 0.)
         self.div_weight = config.model.get('div_weight', 0.)
 
@@ -124,7 +125,8 @@ class Trainer:
                 if node_weight is not None:
                     node_weight = node_weight & noised_nodes
             loss, metrics = mode_loss(out, X, A.float(), node_weight, edge_weight, self.hyp_loss,
-                                      self.mi_weight, self.div_weight, noise_level=1 - alpha_bar)
+                                      self.mi_weight, self.div_weight, noise_level=1 - alpha_bar,
+                                      hyp_temperature=self.hyp_temperature)
             metrics['loss'] = loss.item()
             self.optimize(loss, [metrics[name] for name in self.metric_names], train)
             return

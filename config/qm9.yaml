@@ -9,10 +9,10 @@ training:
   val_size: 1000
 
 model:
-  architecture: 'digress'
-  nhf: 256
-  edge_node_ratio: 1
-  n_layers: 8
+  architecture: 'GPS'
+  nhf: 128
+  edge_node_ratio: 2
+  n_layers: 5
   mlp_n_layers: 3
   normalization: layer_norm
   T: 32
@@ -28,11 +28,11 @@ extra_features:
   rrwp_k: 5
 
 sampling:
-  id: 'dfm'
+  id: 'sid'
 
 log:
   n_loggin_steps: 1000
-  n_loggin_epochs: 20
+  n_loggin_epochs: 5
   n_val_samples: 1000
   sampling_batch_size: 1000
   n_samples_generation: 1000

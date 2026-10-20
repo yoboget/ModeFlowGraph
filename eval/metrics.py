@@ -13,8 +13,10 @@ except ImportError:
 
 
 class SamplingMetrics:
-    def __init__(self, dataset, max_num_nodes, sampling, ref_loader=None):
+    def __init__(self, dataset, max_num_nodes, sampling, ref_loader=None, ref_size=None):
+        """ref_size: if given, the test reference is a random subset of this size (default: the whole test set)."""
         self.dataset = dataset
+        self.ref_size = ref_size
         self.max_num_nodes = max_num_nodes
         self.sampling = sampling
         if dataset in ['planar', 'sbm', 'enzymes']:
@@ -22,6 +24,8 @@ class SamplingMetrics:
             batch = next(iter(ref_loader))
             X, A, mask = batch_to_dense(batch, max_num_nodes=max_num_nodes)
             self.ref_graphs = get_networkx_from_dense(X.argmax(-1), A.argmax(-1), mask)
+            if ref_size is not None:  # the test loader is shuffled
+                self.ref_graphs = self.ref_graphs[:ref_size]
 
     def __call__(self, X, A, mask, mask_adj, step=None, epoch=None, ema=False):
         ema_string = '_ema' if ema else ''
@@ -48,7 +52,8 @@ class SamplingMetrics:
         annots, adjs, mask = gen_graphs
         gen_mols, num_no_correct = gen_mol(annots, adjs, mask, self.dataset)
         n_samples = annots.size(0)
-        return mol_metric(gen_mols, self.dataset, num_no_correct / n_samples, n_samples, test_metrics=True)
+        return mol_metric(gen_mols, self.dataset, num_no_correct / n_samples, n_samples, test_metrics=True,
+                          ref_size=self.ref_size)
 
     def generic_graph_metrics(self, gen_graphs, dataset):
         metrics = eval_graph_list(self.ref_graphs, gen_graphs, methods=['degree', 'cluster', 'orbit', 'spectral'])

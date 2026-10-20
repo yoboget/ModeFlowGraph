@@ -8,6 +8,13 @@ Training (hyp_loss):
     'wta':     winner-take-all, only the mode with the highest likelihood of G_0 is trained on it, and the
                mode head learns which mode wins (commitment loss).
     'mixture': negative log-likelihood of the mixture.
+    'tempered': interpolation between the two (annealed winner-take-all), with the temperature tau = hyp_temperature.
+               Responsibilities r_k = softmax_k(log pi_k + log p_k(G_0) / tau), held fixed, weight the likelihood of
+               each mode, and the mode head is trained towards them:
+                   loss = -sum_k r_k log p_k(G_0) / N + CE(pi, r).
+               tau -> 0: r is the winner, same gradients as 'wta'. tau = 1: r is the posterior of the mixture,
+               same gradients as 'mixture' for the modes' predictions (the mode head gets a per-graph instead of a
+               per-element weight, as in 'wta'). tau > 1: softer than the posterior, all modes learn from all graphs.
 Optional regularizers:
     MI (mi_weight = lam > 0), with tempered responsibilities r_b = softmax_k(log pi_k + log p_k(G_0^b) / N_b),
         N_b the number of elements of the graph in the loss (without the temperature, r_b is one-hot as soon as
@@ -36,17 +43,19 @@ def to_class_logits(logits):
     return logits
 
 
-def mode_loss(out, x, a, node_weight, edge_weight, hyp_loss, mi_weight=0., div_weight=0., noise_level=None):
+def mode_loss(out, x, a, node_weight, edge_weight, hyp_loss, mi_weight=0., div_weight=0., noise_level=None,
+              hyp_temperature=1.):
     """
     Args:
         out: (mode_logits (bs, M), x_logits (bs, n, M, dx), a_logits (bs, n, n, M, de)).
         x, a: clean graph, one-hot (bs, n, dx) and (bs, n, n, de).
         node_weight (bs, n), edge_weight (bs, n, n): elements entering the likelihood (each edge counted once).
             node_weight is None for graphs without node types.
+        hyp_temperature: temperature tau of the 'tempered' loss.
         noise_level (bs,): 1 - alpha_bar_t, weight of the divergence regularizer (1 if None).
     Returns:
         loss and a dict of detached metrics: node and edge nll, mode loss (commitment for 'wta', responsibility
-        entropy for 'mixture'), the batch estimate of I(k; G_0) and the mean divergence D_e between the modes.
+        entropy for 'mixture', soft commitment for 'tempered'), the batch estimate of I(k; G_0) and the mean divergence D_e between the modes.
     """
     mode_logits, x_logits, a_logits = out
     edge_lp = (to_class_logits(a_logits).log_softmax(-1) * a.unsqueeze(-2)).sum(-1)       # (bs, n, n, M)
@@ -77,8 +86,17 @@ def mode_loss(out, x, a, node_weight, edge_weight, hyp_loss, mi_weight=0., div_w
         aux = F.cross_entropy(mode_logits[has_elements], best[has_elements]) if has_elements.any() \
             else mode_logits.sum() * 0
         loss = recon + aux
+    elif hyp_loss == 'tempered':
+        if hyp_temperature > 0:
+            resp = (mode_logits.log_softmax(-1) + graph_lp / hyp_temperature).softmax(-1).detach()
+        else:
+            resp = F.one_hot(graph_lp.argmax(-1), graph_lp.size(-1)).float()
+        recon = -(resp * graph_lp).sum() / n_elements
+        commit = -(resp * mode_logits.log_softmax(-1)).sum(-1)
+        aux = commit[has_elements].mean() if has_elements.any() else mode_logits.sum() * 0
+        loss = recon + aux
     else:
-        raise NotImplementedError(f'Unknown hyp_loss {hyp_loss}. Available: wta, mixture')
+        raise NotImplementedError(f'Unknown hyp_loss {hyp_loss}. Available: wta, mixture, tempered')
 
     if has_elements.any():
         tempered_lp = mode_logits.log_softmax(-1) + graph_lp / graph_size.clamp_min(1).unsqueeze(-1)

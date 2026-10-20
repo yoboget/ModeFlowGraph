@@ -8,6 +8,10 @@ from dataset import get_dataset
 from easydict import EasyDict as edict
 from trainer import Trainer
 import numpy as np
+from torch_geometric.loader import DataLoader
+
+from eval.metrics import SamplingMetrics
+from utils.func import batch_to_dense, get_edge_mask
 
 from utils.parser import parse_args
 
@@ -87,12 +91,39 @@ def main() -> None:
         print(f'time: {times.mean()} \\pm {times.std()}')
         wandb.finish()
 
+    elif work_type == 'train_vs_test':
+        # reference values of the metrics: training graphs evaluated against the test set, both of size
+        # n_samples_generation
+        torch.manual_seed(42)
+        wandb.init(project=f'sid_{dataset}_train_vs_test', config=config, mode=args.wandb)
+        dataloader = get_dataset(config)
+        n = config.log.n_samples_generation
+        X, A, mask, mask_adj = sample_training_graphs(dataloader['train'].dataset, n, config.data.max_num_nodes)
+        print(f'Evaluating {X.size(0)} training graphs against the test set')
+        eval_samples = SamplingMetrics(dataset, config.data.max_num_nodes, sampling=True,
+                                       ref_loader=dataloader['test'], ref_size=n)
+        eval_samples(X, A, mask, mask_adj)
+        wandb.finish()
+
+    else:
+        raise NotImplementedError(f'Unknown work_type {work_type}. Available: train, sample, train_vs_test')
+
+
+def sample_training_graphs(train_set, n, max_num_nodes):
+    """n random training graphs, in the format of the sampler: node / edge types, node mask and edge mask."""
+    batch = next(iter(DataLoader(train_set, batch_size=n, shuffle=True)))
+    X, A, mask = batch_to_dense(batch, max_num_nodes=max_num_nodes)
+    adj_mask = get_edge_mask(mask)
+    return X.argmax(-1) * mask, A.argmax(-1) * adj_mask, mask, adj_mask
+
+
 def update_config(config, dataset, work_type, args):
     config.dataset = dataset
     config.work_type = work_type
     config.denoiser_dir = args.denoiser_dir
     config.model.num_modes = args.num_modes
     config.model.hyp_loss = args.hyp_loss
+    config.model.hyp_temperature = args.hyp_temperature
     config.model.mi_weight = args.mi_weight
     config.model.div_weight = args.div_weight
     config.sampling.hyp_selection = args.hyp_selection

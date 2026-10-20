@@ -115,13 +115,14 @@ def novelty(gen, train):
     return len(gen_smiles_set - train_set) / len(gen_smiles_set)
 
 
-def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False):
+def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False, ref_size=None):
     '''
     Args:
         - gen_mols: list of (corrected) RDKit molecules
         - dataset: dataset name
         - validity: fraction of generated graphs that are valid molecules without valency correction
         - n_samples: number of generated graphs
+        - ref_size: if given, the test reference is a random subset of this size (default: the whole test set)
     Return:
         - Dict with key valid, unique, novel, nspdk, fcd, ...
     '''
@@ -150,6 +151,11 @@ def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False):
         with open(f'./data/{dataset}/raw/test_nx_{dataset}.pkl', 'rb') as f:
             test_graph_list = pickle.load(f)
             random.Random(42).shuffle(test_graph_list)
+
+        if ref_size is not None:
+            test_smiles = random.Random(42).sample(test_smiles, min(ref_size, len(test_smiles)))
+            test_graph_list = test_graph_list[:ref_size]
+            print(f'Test reference: {len(test_smiles)} smiles, {len(test_graph_list)} graphs')
 
         if len(gen_mols) > 0:
             metrics['nspdk'] = eval_graph_list(test_graph_list, mols_to_nx(gen_mols), methods=['nspdk'])['nspdk']

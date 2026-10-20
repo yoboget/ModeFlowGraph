@@ -52,6 +52,23 @@ class RunningMetric:
             for metric, values in zip(val_metrics.values(), to_log):
                 metric.update(values)
 
+_local_save_dir = None
+
+
+def get_save_dir():
+    """The wandb run directory, or ./checkpoints/<timestamp> when wandb is disabled (its run dir is never created)."""
+    global _local_save_dir
+    if not wandb.run.disabled:
+        save_dir = wandb.run.dir
+    else:
+        if _local_save_dir is None:
+            _local_save_dir = os.path.join('checkpoints', time.strftime('%Y%m%d_%H%M%S'))
+            print(f'wandb is disabled: checkpoints are saved in {_local_save_dir}')
+        save_dir = _local_save_dir
+    os.makedirs(save_dir, exist_ok=True)
+    return save_dir
+
+
 def save_model(metric, best_run, to_save, step, save_name,
                minimize=True):
     denoiser, opt = to_save
@@ -66,7 +83,7 @@ def save_model(metric, best_run, to_save, step, save_name,
     if condition:
         best_run[save_name] = metric
         print(f'New best {save_name}: {metric}')
-        save_dir = wandb.run.dir
+        save_dir = get_save_dir()
 
         torch.save({
             'iteration': step,
