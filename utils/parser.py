@@ -61,7 +61,7 @@ def parse_args():
 
     parser.add_argument(
         "--hyp_selection", type=str, choices=['sample', 'average'],
-        default='sample', help="num_modes > 1: sample one mode per graph at each step, or use the expectation "
+        default='average', help="num_modes > 1: sample one mode per graph at each step, or use the expectation "
                                "of the mixture (recovers the standard formulation)"
     )
 
