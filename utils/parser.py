@@ -12,7 +12,7 @@ def parse_args():
 
     parser.add_argument(
         "--work_type", type=str,
-        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./wandb/run-20261019_170353-03tajjr5/files/', help="Path to the model directory"
+        default='./wandb/run-20261021_091745-8ka30j99/files/', help="Path to the model directory"
     )
 
     parser.add_argument(

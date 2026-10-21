@@ -6,8 +6,8 @@ Graphs are dense one-hot tensors:
     a: (bs, n, n, de)  edge types, class 0 is 'no edge'
     node_mask: (bs, n) and adj_mask: (bs, n, n) (no self-loops) mark the existing nodes / node pairs.
 
-Each node and edge independently keeps its clean value with probability alpha_bar and is otherwise
-replaced by a draw from the prior:
+Time runs from t = 0 (pure noise, the prior) to t = 1 (data). At time t, each node and edge independently keeps
+its clean value with probability alpha_bar(t) = cos(pi (1 - t) / 2)^c and is otherwise replaced by a draw from the prior:
     - 'marginal': the node / edge type distribution of the training set,
     - 'masking':  a mask token, added as an extra last class.
 Graphs without node types only have their edges noised.
@@ -28,7 +28,7 @@ class NoiserDense:
     def __init__(self, timesteps, prior, node_marginals, edge_marginals, schedule_c=2.):
         """
         Args:
-            timesteps: number of sampling steps T.
+            timesteps: number of sampling steps T, on the uniform grid t = 0, 1 / T, ..., 1.
             prior: 'marginal' or 'masking'.
             node_marginals, edge_marginals: node / edge type distributions of the training set.
             schedule_c: exponent c of the schedule alpha_bar(t) = cos(pi t / 2)^c.
@@ -38,8 +38,6 @@ class NoiserDense:
         self.T = timesteps
         self.prior = prior
         self.schedule_c = schedule_c
-        # Discrete cosine schedule (DiGress), used by the 'dif' and 'dfm' samplers
-        self.schedule = DiscreteCosineSchedule(timesteps)
 
         if prior == 'marginal':
             self.node_prior, self.edge_prior = node_marginals, edge_marginals
@@ -48,9 +46,9 @@ class NoiserDense:
             self.edge_prior = mask_token(len(edge_marginals) + 1)
 
     def get_alpha_bar(self, t):
-        """Probability that an element is still clean at time t (t = 0: data, t = 1: prior)."""
+        """Probability that an element is clean at time t (t = 0: prior, t = 1: data)."""
         # clamp: cos(pi / 2) is slightly negative in float, which gives NaN for non-integer c
-        return torch.cos(0.5 * np.pi * torch.as_tensor(t, dtype=torch.float)).clamp(min=0) ** self.schedule_c
+        return torch.cos(0.5 * np.pi * (1 - torch.as_tensor(t, dtype=torch.float))).clamp(min=0) ** self.schedule_c
 
     def to_noisy_classes(self, p):
         """Maps one-hot vectors / probabilities over the data classes to the noisy classes (adds the mask class)."""
@@ -74,7 +72,7 @@ class NoiserDense:
 
     def __call__(self, x, a, node_mask, alpha_bar):
         """
-        Samples G_t ~ q(G_t | G_0).
+        Samples G_t ~ q(G_t | G_1).
 
         Args:
             x, a: clean graph (one-hot over the data classes).
@@ -106,36 +104,19 @@ class NoiserDense:
         return x, a, (noised_nodes, noised_edges)
 
 
-class DiscreteCosineSchedule:
-    """Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ, indexed by t = 0, ..., T."""
-
-    def __init__(self, timesteps, s=0.008):
-        steps = timesteps + 2
-        x = np.linspace(0, steps, steps)
-        alphas_cumprod = np.cos(0.5 * np.pi * ((x / steps) + s) / (1 + s)) ** 2
-        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-        betas = 1 - alphas_cumprod[1:] / alphas_cumprod[:-1]
-
-        self.betas = torch.from_numpy(betas).float()
-        alphas = 1 - torch.clamp(self.betas, min=0, max=0.9999)
-        self.alphas_bar = torch.exp(torch.cumsum(torch.log(alphas), dim=0))
-
-
 class MarginalUniformTransition:
     """
-    Transition matrices of a discrete diffusion with prior distribution m (rows: from, columns: to):
-        Q_t     = (1 - beta_t) I + beta_t 1 m^T              one step, t - 1 -> t
-        Q_bar_t = alpha_bar_t I + (1 - alpha_bar_t) 1 m^T    t steps,  0 -> t
+    Noising transition matrices with prior distribution m (rows: from, columns: to). Noising from time t to an
+    earlier time s <= t keeps an element clean with probability alpha_bar(s) / alpha_bar(t):
+        Q(alpha) = alpha I + (1 - alpha) 1 m^T,
+    so q(z_s | z_1) = Q(alpha_bar(s)) and q(z_s | z_t) = Q(alpha_bar(s) / alpha_bar(t)).
     """
 
     def __init__(self, prior):
         self.prior = prior
 
-    def get_Qt(self, beta_t):
-        return self._mix(1 - beta_t)
-
-    def get_Qt_bar(self, alpha_bar_t):
-        return self._mix(alpha_bar_t)
+    def get_Q(self, alpha):
+        return self._mix(torch.as_tensor(alpha, dtype=torch.float))
 
     def _mix(self, w):
         k = self.prior.size(-1)

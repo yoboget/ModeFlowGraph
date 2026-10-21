@@ -1,10 +1,12 @@
 """
 Graph generation with a trained denoiser.
 
-Three sampling methods are available (config `sampling.id`), all starting from the prior and running T steps:
-    - 'sid': simple iterative denoising. The denoiser predicts a clean graph G_0 from G_t, and the prediction
-             is noised again to the next (lower) noise level.
-    - 'dif': ancestral sampling of the discrete diffusion (DiGress): G_s ~ sum_{G_0} q(G_s | G_t, G_0) p(G_0 | G_t).
+Three sampling methods are available (config `sampling.id`). They share the noise schedule of the training,
+alpha_bar(t) = noiser.get_alpha_bar(t), and the time grid t_k = k / T, k = 0, ..., T, from the prior (t = 0)
+to the data (t = 1). Each step k goes from t = t_k to the next time u = t_{k+1}:
+    - 'sid': simple iterative denoising. The denoiser predicts a clean graph G_1 from G_t, and the prediction
+             is noised again to the next (lower) noise level u.
+    - 'dif': ancestral sampling of the discrete diffusion (DiGress): G_u ~ sum_{G_1} q(G_u | G_t, G_1) p(G_1 | G_t).
     - 'dfm': discrete flow matching, Euler steps along the mixture path between the prior and the data.
 
 See utils/noising.py for the dense graph representation and the priors.
@@ -22,7 +24,7 @@ class Sampler:
                  batch_size, device, hyp_selection='sample'):
         """
         Args:
-            noiser: NoiserDense, defines the prior, the noise schedules and the number of steps T.
+            noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
             extra_features: ExtraFeatures, appended to the denoiser input (as during training).
             num_nodes_distribution: (max_num_nodes + 1,) distribution of the number of nodes.
             n_node_types: number of node types (1 for graphs without node types).
@@ -81,75 +83,74 @@ class Sampler:
     # ----------------------------------------------------------------------------------------------------------------
 
     def sample_sid(self, node_mask):
-        """Simple iterative denoising: predict G_0 from G_t, then noise the prediction to level t - 1."""
+        """Simple iterative denoising: predict G_1 from G_t, then noise the prediction to the next time u."""
         adj_mask = get_edge_mask(node_mask)
         x_t, a_t = self.sample_prior(node_mask)
 
-        for t in range(self.T, 0, -1):
-            alpha_bar_t = self.noiser.get_alpha_bar(t / self.T)
-            p_x0, p_a0 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
-            x_0 = sample_nodes(p_x0, node_mask) if self.has_node_types else x_t
-            a_0 = sample_edges(p_a0, adj_mask)
+        for k in range(self.T):
+            alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
+            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
+            x_1 = sample_nodes(p_x1, node_mask) if self.has_node_types else x_t
+            a_1 = sample_edges(p_a1, adj_mask)
 
             if self.noiser.prior == 'masking':
                 # Elements that are not masked in G_t are known to be clean: keep them
                 if self.has_node_types:
-                    x_0 = keep_unmasked(x_t, x_0)
-                a_0 = keep_unmasked(a_t, a_0)
+                    x_1 = keep_unmasked(x_t, x_1)
+                a_1 = keep_unmasked(a_t, a_1)
 
-            if t == 1:
-                return x_0, a_0
-            alpha_bar_s = self.noiser.get_alpha_bar((t - 1) / self.T)
-            x_t, a_t, _ = self.noiser(x_0, a_0, node_mask, alpha_bar_s)
+            if k == self.T - 1:
+                return x_1, a_1
+            alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
+            x_t, a_t, _ = self.noiser(x_1, a_1, node_mask, alpha_bar_u)
 
     def sample_dif(self, node_mask):
-        """Ancestral sampling of the discrete diffusion: G_{t-1} ~ sum_{G_0} q(G_{t-1} | G_t, G_0) p(G_0 | G_t)."""
+        """Ancestral sampling of the discrete diffusion: G_u ~ sum_{G_1} q(G_u | G_t, G_1) p(G_1 | G_t)."""
         adj_mask = get_edge_mask(node_mask)
-        schedule = self.noiser.schedule
         x_t, a_t = self.sample_prior(node_mask)
 
-        for t in range(self.T, 0, -1):
-            s = t - 1
-            beta_t = schedule.betas[t]
-            alpha_bar_t, alpha_bar_s = schedule.alphas_bar[t], schedule.alphas_bar[s]
+        for k in range(self.T):
+            last = k == self.T - 1
+            alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
+            alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
 
-            p_x0, p_a0 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
+            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
 
-            p_as = diffusion_posterior(a_t, self.noiser.to_noisy_classes(p_a0), self.edge_transitions,
-                                       beta_t, alpha_bar_t, alpha_bar_s)
-            if s == 0:
-                p_as = self.drop_mask_class(p_as)
-            a_t = sample_edges(p_as, adj_mask)
+            p_au = diffusion_posterior(a_t, self.noiser.to_noisy_classes(p_a1), self.edge_transitions,
+                                       alpha_bar_t, alpha_bar_u)
+            if last:
+                p_au = self.drop_mask_class(p_au)
+            a_t = sample_edges(p_au, adj_mask)
 
             if self.has_node_types:
-                p_xs = diffusion_posterior(x_t, self.noiser.to_noisy_classes(p_x0), self.node_transitions,
-                                           beta_t, alpha_bar_t, alpha_bar_s)
-                if s == 0:
-                    p_xs = self.drop_mask_class(p_xs)
-                x_t = sample_nodes(p_xs, node_mask)
+                p_xu = diffusion_posterior(x_t, self.noiser.to_noisy_classes(p_x1), self.node_transitions,
+                                           alpha_bar_t, alpha_bar_u)
+                if last:
+                    p_xu = self.drop_mask_class(p_xu)
+                x_t = sample_nodes(p_xu, node_mask)
 
-        x_0 = self.noiser.from_noisy_classes(x_t) if self.has_node_types else x_t
-        return x_0, self.noiser.from_noisy_classes(a_t)
+        x_1 = self.noiser.from_noisy_classes(x_t) if self.has_node_types else x_t
+        return x_1, self.noiser.from_noisy_classes(a_t)
 
     def sample_dfm(self, node_mask):
         """
-        Discrete flow matching along the mixture path, from the prior (time 0) to the data (time 1):
-            p_t(z) = kappa(t) delta(z, z_1) + (1 - kappa(t)) prior(z),    kappa(t) = 1 - alpha_bar(t).
-        Euler step of size dt = 1 / T:
-            p(z_{t+dt}) = z_t + dt * kappa'(t) / (1 - kappa(t)) * (p(z_1 | z_t) - z_t).
+        Discrete flow matching along the mixture path of the noising process:
+            p_t(z) = kappa(t) delta(z, z_1) + (1 - kappa(t)) prior(z),    kappa(t) = alpha_bar(t).
+        Euler step from t to u, with the finite difference kappa(u) - kappa(t) in place of (u - t) kappa'(t):
+            p(z_u) = z_t + (kappa(u) - kappa(t)) / (1 - kappa(t)) * (p(z_1 | z_t) - z_t).
+        The step size is the probability that an element still on the prior jumps to the data in (t, u], in [0, 1].
         """
         if self.noiser.prior != 'marginal':
             raise NotImplementedError("'dfm' sampling is only implemented for the 'marginal' prior.")
         adj_mask = get_edge_mask(node_mask)
-        alphas_bar = self.noiser.schedule.alphas_bar
         x_t, a_t = self.sample_prior(node_mask)
 
-        for k in range(self.T):  # flow time t = k / T
-            # The denoiser is conditioned on the diffusion noise level, i.e. at diffusion time 1 - t
-            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alphas_bar[self.T - k])
+        for k in range(self.T):
+            alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
+            alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
+            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
 
-            # dt * kappa'(t) / (1 - kappa(t)), with a finite difference for kappa'
-            step = ((alphas_bar[k] - alphas_bar[k + 1]) / alphas_bar[k]).to(self.device)
+            step = ((alpha_bar_u - alpha_bar_t) / (1 - alpha_bar_t)).to(self.device)
             p_a = a_t + step * (p_a1 - a_t)
             a_t = sample_edges(p_a / p_a.sum(-1, keepdim=True), adj_mask)
             if self.has_node_types:
@@ -168,7 +169,7 @@ class Sampler:
         return torch.arange(self.max_num_nodes, device=self.device).unsqueeze(0) < n_nodes.unsqueeze(1)
 
     def sample_prior(self, node_mask):
-        """G_T: every node and edge is drawn from the prior (nodes without types are left at 1)."""
+        """G_0: every node and edge is drawn from the prior (nodes without types are left at 1)."""
         bs, n = node_mask.shape
         adj_mask = get_edge_mask(node_mask)
         if self.has_node_types:
@@ -179,7 +180,7 @@ class Sampler:
         return x, a
 
     def predict_clean_graph(self, x_t, a_t, node_mask, alpha_bar):
-        """Denoiser prediction p(G_0 | G_t), as probabilities over the data classes."""
+        """Denoiser prediction p(G_1 | G_t), as probabilities over the data classes."""
         x_in = self.noiser.add_noise_level(x_t, alpha_bar)
         x_in, a_in = self.extra_features(x_in, a_t, node_mask)
         out = self.model(x_in, a_in, node_mask)
@@ -204,32 +205,32 @@ class Sampler:
         return p / p.sum(-1, keepdim=True)
 
 
-def keep_unmasked(z_t, z_0):
-    """Masking prior: returns z_t where it is not masked (last class) and z_0 elsewhere, over the noisy classes."""
+def keep_unmasked(z_t, z_1):
+    """Masking prior: returns z_t where it is not masked (last class) and z_1 elsewhere, over the noisy classes."""
     is_masked = z_t[..., -1:].bool()
-    return torch.where(is_masked, z_0, z_t[..., :-1])
+    return torch.where(is_masked, z_1, z_t[..., :-1])
 
 
-def diffusion_posterior(z_t, p_z0, transitions, beta_t, alpha_bar_t, alpha_bar_s):
+def diffusion_posterior(z_t, p_z1, transitions, alpha_bar_t, alpha_bar_u):
     """
-    p(z_s | z_t) = sum_{z_0} q(z_s | z_t, z_0) p(z_0 | z_t), for s = t - 1, with
-    q(z_s | z_t, z_0) = q(z_t | z_s) q(z_s | z_0) / q(z_t | z_0).
+    p(z_u | z_t) = sum_{z_1} q(z_u | z_t, z_1) p(z_1 | z_t), for the next time u > t, with
+    q(z_u | z_t, z_1) = q(z_t | z_u) q(z_u | z_1) / q(z_t | z_1).
 
     Args:
         z_t: (..., k) one-hot noisy nodes or edges.
-        p_z0: (..., k) predicted clean distribution, over the noisy classes.
+        p_z1: (..., k) predicted clean distribution, over the noisy classes.
     Returns:
-        (..., k) distribution of z_s.
+        (..., k) distribution of z_u.
     """
-    Qt = transitions.get_Qt(beta_t)                # Qt[i, j] = q(z_t = j | z_s = i)
-    Qs_bar = transitions.get_Qt_bar(alpha_bar_s)   # Qs_bar[i, j] = q(z_s = j | z_0 = i)
-    Qt_bar = transitions.get_Qt_bar(alpha_bar_t)   # Qt_bar[i, j] = q(z_t = j | z_0 = i)
+    Q_tu = transitions.get_Q(alpha_bar_t / alpha_bar_u)   # Q_tu[i, j] = q(z_t = j | z_u = i)
+    Q_u = transitions.get_Q(alpha_bar_u)                  # Q_u[i, j] = q(z_u = j | z_1 = i)
+    Q_t = transitions.get_Q(alpha_bar_t)                  # Q_t[i, j] = q(z_t = j | z_1 = i)
 
-    q_zt_given_zs = (z_t @ Qt.T).unsqueeze(-2)          # (..., 1, k_s)
-    q_zt_given_z0 = (z_t @ Qt_bar.T).unsqueeze(-1)      # (..., k_0, 1)
-    q_zt_given_z0 = q_zt_given_z0.masked_fill(q_zt_given_z0 == 0, 1e-6)
-    q_zs_given_zt_z0 = q_zt_given_zs * Qs_bar / q_zt_given_z0    # (..., k_0, k_s)
+    q_zt_given_zu = (z_t @ Q_tu.T).unsqueeze(-2)        # (..., 1, k_u)
+    q_zt_given_z1 = (z_t @ Q_t.T).unsqueeze(-1)         # (..., k_1, 1)
+    q_zt_given_z1 = q_zt_given_z1.masked_fill(q_zt_given_z1 == 0, 1e-6)
+    q_zu_given_zt_z1 = q_zt_given_zu * Q_u / q_zt_given_z1    # (..., k_1, k_u)
 
-    p_zs = (p_z0.unsqueeze(-1) * q_zs_given_zt_z0).sum(-2)     # (..., k_s)
-    p_zs[p_zs.sum(-1) == 0] = 1e-5
-    return p_zs / p_zs.sum(-1, keepdim=True)
+    p_zu = (p_z1.unsqueeze(-1) * q_zu_given_zt_z1).sum(-2)     # (..., k_u)
+    p_zu[p_zu.sum(-1) == 0] = 1e-5
+    return p_zu / p_zu.sum(-1, keepdim=True)
