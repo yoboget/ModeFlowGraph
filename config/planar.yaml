@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 0
 
 sampling:
-  id: 'sid'
+  id: 'dfm'
 
 log:
   n_loggin_steps: 1000
