@@ -25,17 +25,19 @@ PRIORS = ('marginal', 'masking')
 
 
 class NoiserDense:
-    def __init__(self, timesteps, prior, node_marginals, edge_marginals):
+    def __init__(self, timesteps, prior, node_marginals, edge_marginals, schedule_c=2.):
         """
         Args:
             timesteps: number of sampling steps T.
             prior: 'marginal' or 'masking'.
             node_marginals, edge_marginals: node / edge type distributions of the training set.
+            schedule_c: exponent c of the schedule alpha_bar(t) = cos(pi t / 2)^c.
         """
         if prior not in PRIORS:
             raise NotImplementedError(f'Unknown prior {prior}. Available: {PRIORS}')
         self.T = timesteps
         self.prior = prior
+        self.schedule_c = schedule_c
         # Discrete cosine schedule (DiGress), used by the 'dif' and 'dfm' samplers
         self.schedule = DiscreteCosineSchedule(timesteps)
 
@@ -45,10 +47,10 @@ class NoiserDense:
             self.node_prior = mask_token(len(node_marginals) + 1)
             self.edge_prior = mask_token(len(edge_marginals) + 1)
 
-    @staticmethod
-    def get_alpha_bar(t):
+    def get_alpha_bar(self, t):
         """Probability that an element is still clean at time t (t = 0: data, t = 1: prior)."""
-        return torch.cos(0.5 * np.pi * torch.as_tensor(t, dtype=torch.float)) ** 2
+        # clamp: cos(pi / 2) is slightly negative in float, which gives NaN for non-integer c
+        return torch.cos(0.5 * np.pi * torch.as_tensor(t, dtype=torch.float)).clamp(min=0) ** self.schedule_c
 
     def to_noisy_classes(self, p):
         """Maps one-hot vectors / probabilities over the data classes to the noisy classes (adds the mask class)."""

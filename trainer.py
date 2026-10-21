@@ -56,7 +56,8 @@ class Trainer:
 
         ### NOISING AND SAMPLING ###
         node_marginals, edge_marginals = get_distribution(self.loaders['train'], config.dataset)
-        self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals)
+        self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals,
+                                  schedule_c=config.model.get('schedule_c', 2.))
 
         self.sampling_method = config.sampling.id
         num_nodes_distribution = get_num_nodes_distribution(self.loaders, self.max_num_nodes, config.dataset)

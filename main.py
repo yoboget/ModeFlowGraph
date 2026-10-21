@@ -126,6 +126,7 @@ def update_config(config, dataset, work_type, args):
     config.model.hyp_temperature = args.hyp_temperature
     config.model.mi_weight = args.mi_weight
     config.model.div_weight = args.div_weight
+    config.model.schedule_c = args.schedule_c
     config.sampling.hyp_selection = args.hyp_selection
     return config
 

@@ -28,7 +28,7 @@ def parse_args():
 
     parser.add_argument(
         "--num_modes", type=int,
-        default=1, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
+        default=32, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
     )
 
     parser.add_argument(
@@ -52,6 +52,11 @@ def parse_args():
         "--div_weight", type=float,
         default=0.0, help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
                          "modes' predictions per element (pushes the modes to specialize)"
+    )
+
+    parser.add_argument(
+        "--schedule_c", type=float,
+        default=.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(
