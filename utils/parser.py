@@ -6,29 +6,29 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset", type=str,
-        default='planar',
+        default='qm9',
         help="Name of the dataset. Available: qm9, qm9H, zinc, planar, sbm, enzymes"
     )
 
     parser.add_argument(
         "--work_type", type=str,
-        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
     parser.add_argument(
         "--wandb", type=str,
-        default='on', help="If W&B is online, offline or disabled"
+        default='no', help="If W&B is online, offline or disabled"
     )
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./wandb/run-20261021_091745-8ka30j99/files/', help="Path to the model directory"
+        default=None, help="Path to the model directory"
     )
 
     parser.add_argument(
         "--num_modes", type=int,
-        default=32, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
+        default=1, help="Number of modes M predicted by the denoiser (1: standard single-mode denoiser)"
     )
 
     parser.add_argument(
@@ -43,20 +43,36 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--mi_weight", type=float,
-        default=0.0, help="num_modes > 1: weight lam of the regularizer -lam * (H(k) - H(k | G_0)), which rewards "
-                         "confident responsibilities and a balanced usage of the modes"
+        "--training_method", type=str, choices=['denoiser', 'cavity'],
+        default='denoiser', help="What the denoiser outputs: 'denoiser' p(z_1 | G_t) or 'cavity' p(z_1 | G_t without "
+                                 "z_t), the prediction without the element's own noisy value. Both are trained with "
+                                 "the cross-entropy (the cavity through its conversion to the denoiser); must match "
+                                 "the checkpoint when sampling"
     )
 
     parser.add_argument(
-        "--div_weight", type=float,
-        default=0.0, help="num_modes > 1: weight lam of the regularizer -lam * D, with D the divergence between the "
-                         "modes' predictions per element (pushes the modes to specialize)"
+        "--sampling_method", type=str, choices=['denoiser', 'cavity'],
+        default='denoiser', help="'dif' sampling: posterior sum_z1 q(z_u | z_t, z_1) p(z_1 | G_t) with the denoiser, or "
+                                 "the plug-in q(z_t | z_u) sum_z1 c(z_1) q(z_u | z_1) with the cavity; the output is "
+                                 "converted from --training_method when they differ (sid / dfm always use the "
+                                 "denoiser)"
+    )
+
+    parser.add_argument(
+        "--greedy_last_step", type=bool,
+         default=True, help="Last sampling step (sid / dif / dfm): take the most likely class of each node / edge under the "
+             "prediction p(z_1 | G_t) instead of sampling it"
+    )
+
+    parser.add_argument(
+        "--dirichlet_scale", type=float,
+        default=3., help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+                         "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
     parser.add_argument(
         "--schedule_c", type=float,
-        default=.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(

@@ -15,7 +15,7 @@ def load_denoiser(config, loader, extra_features, device, prior,
         loader: Data loader containing training data.
         extra_features: Object containing extra features information.
         device: Device to load models onto (e.g., 'cuda' or 'cpu').
-        prior: Noise prior ('marginal' or 'masking').
+        prior: Noise prior ('marginal', 'masking' or 'dirichlet').
         denoiser_dir: Directory to load pre-trained denoiser model from (optional).
 
     Returns:

@@ -11,17 +11,25 @@ its clean value with probability alpha_bar(t) = cos(pi (1 - t) / 2)^c and is oth
     - 'marginal': the node / edge type distribution of the training set,
     - 'masking':  a mask token, added as an extra last class.
 Graphs without node types only have their edges noised.
+
+NoiserDirichlet is a continuous alternative (prior 'dirichlet', as in dirisid's 'dirch'): each node / edge is a point
+on the simplex, z_t ~ Dir(1 + alpha(t) z_1) with alpha(t) = -scale log(1 - t), so that z_t is uniform on the simplex at
+t = 0 and concentrates on the vertex z_1 as t -> 1.
 """
 import os.path
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
+from torch.distributions.dirichlet import Dirichlet
 
 from utils.func import get_edge_mask
 
 
-PRIORS = ('marginal', 'masking')
+PRIORS = ('marginal', 'masking', 'dirichlet')
+# What the denoiser predicts (training_method) / what the 'dif' sampler uses (sampling_method), see
+# NoiserDense.convert_parametrization
+PARAMETRIZATIONS = ('denoiser', 'cavity')
 
 
 class NoiserDense:
@@ -33,8 +41,9 @@ class NoiserDense:
             node_marginals, edge_marginals: node / edge type distributions of the training set.
             schedule_c: exponent c of the schedule alpha_bar(t) = cos(pi t / 2)^c.
         """
-        if prior not in PRIORS:
-            raise NotImplementedError(f'Unknown prior {prior}. Available: {PRIORS}')
+        if prior not in PRIORS or prior == 'dirichlet':
+            raise NotImplementedError(f'Unknown prior {prior} for NoiserDense. Available: {PRIORS[:2]} '
+                                      f"(use NoiserDirichlet for 'dirichlet')")
         self.T = timesteps
         self.prior = prior
         self.schedule_c = schedule_c
@@ -102,6 +111,134 @@ class NoiserDense:
         a = a * adj_mask.unsqueeze(-1)
 
         return x, a, (noised_nodes, noised_edges)
+
+    def log_q_zt_given_z1(self, z_t, alpha_bar, kind):
+        """
+        log q(z_t | z_1 = j) for every data class j, 'marginal' prior: alpha_bar delta(z_t, j) + (1 - alpha_bar) m(z_t).
+        z_t: (bs, ..., k) one-hot, alpha_bar: scalar or (bs,), kind: 'node' or 'edge'. Returns (bs, ..., k).
+        Padding elements (z_t = 0) get the same value for every class, so converting them changes nothing.
+        """
+        prior = (self.node_prior if kind == 'node' else self.edge_prior).to(z_t.device)
+        alpha_bar = torch.as_tensor(alpha_bar, dtype=z_t.dtype, device=z_t.device)
+        if alpha_bar.ndim == 1:
+            alpha_bar = alpha_bar.view(-1, *[1] * (z_t.ndim - 1))
+        m_zt = (z_t * prior).sum(-1, keepdim=True)
+        return torch.log((alpha_bar * z_t + (1 - alpha_bar) * m_zt).clamp_min(1e-20))
+
+    def convert_parametrization(self, logits, z_t, alpha_bar, kind, source, target):
+        """
+        Converts the prediction of a node / edge z between the two parametrizations of the denoiser:
+            'denoiser': p(z_1 | G_t), the prediction given the whole noisy graph,
+            'cavity':   c(z_1) = p(z_1 | G_t without z_t), without the evidence of the element's own noisy value.
+        The elements are noised independently, so z_t only depends on z_1 and
+            p(z_1 | G_t) ∝ c(z_1) q(z_t | z_1).
+        'masking' prior: no conversion. A masked z_t has q(z_t | z_1) = 1 - alpha_bar for every z_1, so both are
+        equal; an unmasked z_t is known to be clean, and the samplers never use the prediction there.
+
+        Args:
+            logits: (bs, ..., k) logits or log-probabilities over the data classes, or (bs, ..., M, k) for the M modes
+                of a multi-mode denoiser.
+            z_t: (bs, ..., k) one-hot noisy elements. alpha_bar: scalar or (bs,), the noise level of G_t.
+        Returns:
+            log-probabilities in the target parametrization, same shape as logits.
+        """
+        assert source in PARAMETRIZATIONS and target in PARAMETRIZATIONS, (source, target)
+        if source == target or self.prior == 'masking':
+            return logits
+        log_q = self.log_q_zt_given_z1(z_t, alpha_bar, kind)
+        if logits.ndim == z_t.ndim + 1:  # mode dimension
+            log_q = log_q.unsqueeze(-2)
+        sign = 1. if source == 'cavity' else -1.
+        return (logits.log_softmax(-1) + sign * log_q).log_softmax(-1)
+
+
+class NoiserDirichlet:
+    """
+    Dirichlet noising (dirisid's 'dirch' prior): each node / edge z_1 (one-hot over k classes) becomes
+        z_t ~ Dir(1 + alpha(t) z_1),    alpha(t) = -scale log(1 - t),
+    i.e. concentration 1 + alpha(t) on the data class and 1 on the others. At t = 0, Dir(1, ..., 1) is uniform on the
+    simplex; as t -> 1, alpha(t) -> infinity and z_t -> z_1. Edges are sampled on the upper triangle and mirrored.
+
+    Same interface as NoiserDense. The noise level passed around (get_alpha_bar) is t itself, and the denoiser gets
+    (t, 1 - t) as two extra node features. Only the 'denoiser' parametrization and 'sid' sampling are supported.
+    """
+
+    def __init__(self, timesteps, scale=3.):
+        """
+        Args:
+            timesteps: number of sampling steps T, on the uniform grid t = 0, 1 / T, ..., 1.
+            scale: alpha(t) = -scale log(1 - t).
+        """
+        self.T = timesteps
+        self.prior = 'dirichlet'
+        self.scale = scale
+
+    def get_alpha_bar(self, t):
+        """Noise level of the Dirichlet path: t itself (t = 0: uniform on the simplex, t = 1: data)."""
+        return torch.as_tensor(t, dtype=torch.float)
+
+    def get_concentration(self, t):
+        """alpha(t) = -scale log(1 - t), the extra concentration on the data class (t < 1)."""
+        return -self.scale * torch.log1p(-t)
+
+    def to_noisy_classes(self, p):
+        return p
+
+    def from_noisy_classes(self, p):
+        return p
+
+    def add_noise_level(self, x, t):
+        """Node input of the denoiser: the noise level (t, 1 - t) as two extra node features. t: scalar or (bs,)."""
+        t = torch.as_tensor(t, dtype=x.dtype, device=x.device)
+        t = t.reshape(-1, 1, 1).expand(x.size(0), x.size(1), 1)
+        return torch.cat((x, t, 1 - t), dim=-1)
+
+    def __call__(self, x, a, node_mask, t):
+        """
+        Samples G_t ~ q(G_t | G_1).
+
+        Args:
+            x, a: clean graph (one-hot over the data classes).
+            node_mask: (bs, n).
+            t: scalar or (bs,) in [0, 1).
+        Returns:
+            x_t, a_t: noisy graph, points on the simplex (zeros on padding, no self-loops).
+            (None, None): no element is 'masked' (kept for the interface of NoiserDense).
+        """
+        bs, n = node_mask.shape
+        t = torch.as_tensor(t, dtype=torch.float, device=a.device).expand(bs)
+        alpha = self.get_concentration(t)
+        adj_mask = get_edge_mask(node_mask)
+
+        if x.size(-1) > 1:
+            x = Dirichlet(1 + alpha.view(bs, 1, 1) * x).sample() * node_mask.unsqueeze(-1)
+
+        a = Dirichlet(1 + alpha.view(bs, 1, 1, 1) * a).sample()
+        a = symmetrize_upper(a) * adj_mask.unsqueeze(-1)
+        return x, a, (None, None)
+
+    def sample_prior(self, node_mask, n_node_types, n_edge_types):
+        """G_0: every node and edge uniform on the simplex (nodes without types are left at 1)."""
+        bs, n = node_mask.shape
+        device = node_mask.device
+        if n_node_types > 1:
+            x = Dirichlet(torch.ones(bs, n, n_node_types, device=device)).sample() * node_mask.unsqueeze(-1)
+        else:
+            x = node_mask.unsqueeze(-1).float()
+        a = Dirichlet(torch.ones(bs, n, n, n_edge_types, device=device)).sample()
+        a = symmetrize_upper(a) * get_edge_mask(node_mask).unsqueeze(-1)
+        return x, a
+
+    def convert_parametrization(self, logits, z_t, alpha_bar, kind, source, target):
+        if source != target:
+            raise NotImplementedError("The 'dirichlet' prior only supports the 'denoiser' parametrization.")
+        return logits
+
+
+def symmetrize_upper(a):
+    """(bs, n, n, k): keeps the strict upper triangle and mirrors it."""
+    a = a.permute(0, 3, 1, 2).triu(1)
+    return (a + a.transpose(-1, -2)).permute(0, 2, 3, 1)
 
 
 class MarginalUniformTransition:

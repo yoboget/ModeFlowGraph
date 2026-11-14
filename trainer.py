@@ -6,9 +6,9 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch
 
 from utils.extra_feat import ExtraFeatures
-from utils.noising import NoiserDense, get_distribution
+from utils.noising import NoiserDense, NoiserDirichlet, get_distribution
 from utils.func import batch_to_dense, get_edge_mask
-from utils.modes import mode_loss
+from utils.modes import mode_loss, to_class_logits
 from utils.node_distribution import get_num_nodes_distribution
 from eval.metrics import SamplingMetrics
 from models.loaders import load_denoiser
@@ -31,8 +31,10 @@ class Trainer:
         self.num_modes = config.model.get('num_modes', 1)
         self.hyp_loss = config.model.get('hyp_loss', 'wta')
         self.hyp_temperature = config.model.get('hyp_temperature', 1.)
-        self.mi_weight = config.model.get('mi_weight', 0.)
-        self.div_weight = config.model.get('div_weight', 0.)
+        # What the denoiser outputs, 'denoiser' p(z_1 | G_t) or 'cavity' p(z_1 | G_t without z_t) (see
+        # NoiserDense.convert_parametrization). Both are trained with the cross-entropy of G_1: a cavity output is
+        # first converted to the denoiser, so it is the cavity at the optimum.
+        self.training_method = config.model.get('training_method', 'denoiser')
 
         ### LOAD MODELS ###
         self.denoiser, self.opt = load_denoiser(config, loaders, self.extra_features, self.device,
@@ -45,9 +47,8 @@ class Trainer:
         self.max_num_nodes = config.data.max_num_nodes
 
         # Define Logger
-        # num_modes > 1 (0 otherwise): 'mode': commitment loss (wta) or responsibility entropy (mixture),
-        # 'mi': I(k; G_0) with tempered responsibilities, 'div': mean divergence between the modes per element
-        self.metric_names = ['loss', 'node', 'edge', 'mode', 'mi', 'div']
+        # num_modes > 1 (0 otherwise): 'mode': commitment loss (wta) or responsibility entropy (mixture)
+        self.metric_names = ['loss', 'node', 'edge', 'mode']
         self.metrics = RunningMetric(self.metric_names)
 
         self.n_logging_steps = config.log.n_loggin_steps
@@ -56,14 +57,22 @@ class Trainer:
 
         ### NOISING AND SAMPLING ###
         node_marginals, edge_marginals = get_distribution(self.loaders['train'], config.dataset)
-        self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals,
-                                  schedule_c=config.model.get('schedule_c', 2.))
+        if self.prior == 'dirichlet':
+            assert self.training_method == 'denoiser', "The 'dirichlet' prior only supports training_method 'denoiser'"
+            self.noiser = NoiserDirichlet(config.model.T, scale=config.model.get('dirichlet_scale', 3.))
+        else:
+            self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals,
+                                      schedule_c=config.model.get('schedule_c', 2.))
 
         self.sampling_method = config.sampling.id
         num_nodes_distribution = get_num_nodes_distribution(self.loaders, self.max_num_nodes, config.dataset)
         self.sampler = Sampler(self.noiser, self.extra_features, num_nodes_distribution, self.max_num_nodes,
                                n_node_types=len(node_marginals), batch_size=config.log.sampling_batch_size,
-                               device=self.device, hyp_selection=config.sampling.get('hyp_selection', 'sample'))
+                               device=self.device, hyp_selection=config.sampling.get('hyp_selection', 'sample'),
+                               training_method=self.training_method,
+                               sampling_method=config.sampling.get('sampling_method', 'denoiser'),
+                               greedy_last_step=config.sampling.get('greedy_last_step', False),
+                               n_edge_types=len(edge_marginals))
 
         ref_loader = self.loaders['test'] if self.sampling else self.loaders['val']
         self.eval_samples = SamplingMetrics(config.dataset, self.max_num_nodes, self.sampling, ref_loader=ref_loader)
@@ -108,7 +117,7 @@ class Trainer:
         X, A, mask = batch_to_dense(batch, max_num_nodes=self.max_num_nodes)
         adj_mask = get_edge_mask(mask)
 
-        # NOISING: t ~ U(0, 1)
+        # NOISING: t ~ U(0, 1) (for the 'dirichlet' prior, alpha_bar is t itself)
         alpha_bar = self.noiser.get_alpha_bar(torch.rand(X.size(0), device=self.device))
         X_noisy, A_noisy, (noised_nodes, noised_edges) = self.noiser(X, A, mask, alpha_bar)
         X_in = self.noiser.add_noise_level(X_noisy, alpha_bar)
@@ -116,6 +125,7 @@ class Trainer:
 
         model = self.denoiser if train else self.denoiser_ema
         out = model(X_in, A_in, mask)
+        out = self.to_denoiser(out, X_noisy, A_noisy, alpha_bar)
 
         if self.num_modes > 1:
             # each edge enters the likelihood once; with masking, only the masked elements are predicted
@@ -126,7 +136,6 @@ class Trainer:
                 if node_weight is not None:
                     node_weight = node_weight & noised_nodes
             loss, metrics = mode_loss(out, X, A.float(), node_weight, edge_weight, self.hyp_loss,
-                                      self.mi_weight, self.div_weight, noise_level=1 - alpha_bar,
                                       hyp_temperature=self.hyp_temperature)
             metrics['loss'] = loss.item()
             self.optimize(loss, [metrics[name] for name in self.metric_names], train)
@@ -161,7 +170,23 @@ class Trainer:
             loss = loss_a
             loss_x = torch.zeros(1, dtype=X_targ.dtype, device=X_targ.device)
 
-        self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), 0., 0., 0.], train)
+        self.optimize(loss, [loss.item(), loss_x.item(), loss_a.item(), 0.], train)
+
+    def to_denoiser(self, out, X_noisy, A_noisy, alpha_bar):
+        """training_method 'cavity': converts the output (single- or multi-mode) to the denoiser logits, on which the
+        loss is computed. Binary edges keep a single output, the logit of 'no edge'."""
+        if self.training_method == 'denoiser':
+            return out
+        mode_logits, (x_logits, a_logits) = (out[0], out[1:]) if len(out) == 3 else (None, out)
+        if X_noisy.size(-1) > 1:
+            x_logits = self.noiser.convert_parametrization(x_logits, X_noisy, alpha_bar, 'node',
+                                                           'cavity', 'denoiser')
+        binary = a_logits.size(-1) == 1
+        a_logits = self.noiser.convert_parametrization(to_class_logits(a_logits), A_noisy, alpha_bar, 'edge',
+                                                       'cavity', 'denoiser')
+        if binary:
+            a_logits = a_logits[..., :1] - a_logits[..., 1:]
+        return (x_logits, a_logits) if mode_logits is None else (mode_logits, x_logits, a_logits)
 
     def optimize(self, loss, to_log, train):
         if train:

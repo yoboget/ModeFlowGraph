@@ -7,21 +7,37 @@ to the data (t = 1). Each step k goes from t = t_k to the next time u = t_{k+1}:
     - 'sid': simple iterative denoising. The denoiser predicts a clean graph G_1 from G_t, and the prediction
              is noised again to the next (lower) noise level u.
     - 'dif': ancestral sampling of the discrete diffusion (DiGress): G_u ~ sum_{G_1} q(G_u | G_t, G_1) p(G_1 | G_t).
+             sampling_method 'denoiser' computes this sum with the denoiser p(z_1 | G_t); 'cavity' plugs the cavity
+             c(z_1) = p(z_1 | G_t without z_t) into q(z_u | z_t, z_1), q(z_t | z_u) sum_{z_1} c(z_1) q(z_u | z_1),
+             the same distribution when c is the exact cavity.
     - 'dfm': discrete flow matching, Euler steps along the mixture path between the prior and the data.
+
+In all three, the last step (u = 1, alpha_bar(u) = 1) draws each element from the prediction p(z_1 | G_t). With
+greedy_last_step, it takes the most likely class instead (argmax of p(z_1 | G_t), edges on the upper triangle and
+mirrored).
+
+The denoiser outputs the denoiser or the cavity (training_method); it is converted to the parametrization each
+sampler uses when they differ (NoiserDense.convert_parametrization): 'sid' and 'dfm' use the denoiser, 'dif' the
+sampling_method.
+
+With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for each element and only 'sid' is
+available: predict G_1 from G_t, sample it, and noise it again with the Dirichlet path at u.
 
 See utils/noising.py for the dense graph representation and the priors.
 """
 import torch
+import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
 from utils.func import get_edge_mask
-from utils.modes import select_mode
-from utils.noising import MarginalUniformTransition, sample_nodes, sample_edges
+from utils.modes import select_mode, to_class_logits
+from utils.noising import MarginalUniformTransition, PARAMETRIZATIONS, sample_nodes, sample_edges
 
 
 class Sampler:
     def __init__(self, noiser, extra_features, num_nodes_distribution, max_num_nodes, n_node_types,
-                 batch_size, device, hyp_selection='sample'):
+                 batch_size, device, hyp_selection='sample', training_method='denoiser',
+                 sampling_method='denoiser', greedy_last_step=False, n_edge_types=None):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
@@ -31,7 +47,14 @@ class Sampler:
             batch_size: number of graphs generated in parallel.
             hyp_selection: multi-mode denoiser only, 'sample' one mode per graph at each step or use the
                 'average' of the mixture (see utils/modes.py).
+            training_method: what the denoiser outputs, 'denoiser' or 'cavity'.
+            sampling_method: the parametrization used by 'dif', 'denoiser' or 'cavity'.
+            greedy_last_step: at the last step, take the argmax of the prediction instead of sampling it.
+            n_edge_types: number of edge types including 'no edge' (needed by the 'dirichlet' prior).
         """
+        assert training_method in PARAMETRIZATIONS and sampling_method in PARAMETRIZATIONS
+        self.training_method = training_method
+        self.sampling_method = sampling_method
         self.noiser = noiser
         self.T = noiser.T
         self.extra_features = extra_features
@@ -41,9 +64,18 @@ class Sampler:
         self.batch_size = batch_size
         self.device = device
         self.hyp_selection = hyp_selection
+        self.greedy_last_step = greedy_last_step
 
-        self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
-        self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
+        self.n_node_types = n_node_types
+        self.n_edge_types = n_edge_types
+        self.dirichlet = noiser.prior == 'dirichlet'
+        if self.dirichlet:
+            assert n_edge_types is not None, "The 'dirichlet' prior needs n_edge_types"
+            assert training_method == 'denoiser', "The 'dirichlet' prior only supports training_method 'denoiser'"
+            self.node_transitions = self.edge_transitions = None
+        else:
+            self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
+            self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
         self.model = None
 
     @torch.no_grad()
@@ -58,6 +90,8 @@ class Sampler:
         samplers = {'sid': self.sample_sid, 'dif': self.sample_dif, 'dfm': self.sample_dfm}
         if method not in samplers:
             raise NotImplementedError(f'Sampling method {method} not implemented. Available: {list(samplers)}')
+        if self.dirichlet and method != 'sid':
+            raise NotImplementedError("The 'dirichlet' prior only supports 'sid' sampling.")
 
         was_training = model.training
         model.eval()
@@ -90,8 +124,9 @@ class Sampler:
         for k in range(self.T):
             alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
             p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
-            x_1 = sample_nodes(p_x1, node_mask) if self.has_node_types else x_t
-            a_1 = sample_edges(p_a1, adj_mask)
+            last = k == self.T - 1
+            x_1 = self.draw_nodes(p_x1, node_mask, last) if self.has_node_types else x_t
+            a_1 = self.draw_edges(p_a1, adj_mask, last)
 
             if self.noiser.prior == 'masking':
                 # Elements that are not masked in G_t are known to be clean: keep them
@@ -99,7 +134,7 @@ class Sampler:
                     x_1 = keep_unmasked(x_t, x_1)
                 a_1 = keep_unmasked(a_t, a_1)
 
-            if k == self.T - 1:
+            if last:
                 return x_1, a_1
             alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
             x_t, a_t, _ = self.noiser(x_1, a_1, node_mask, alpha_bar_u)
@@ -114,20 +149,21 @@ class Sampler:
             alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
             alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
 
-            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
+            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t, target=self.sampling_method)
+            posterior = diffusion_posterior if self.sampling_method == 'denoiser' else cavity_posterior
 
-            p_au = diffusion_posterior(a_t, self.noiser.to_noisy_classes(p_a1), self.edge_transitions,
-                                       alpha_bar_t, alpha_bar_u)
+            p_au = posterior(a_t, self.noiser.to_noisy_classes(p_a1), self.edge_transitions,
+                             alpha_bar_t, alpha_bar_u)
             if last:
                 p_au = self.drop_mask_class(p_au)
-            a_t = sample_edges(p_au, adj_mask)
+            a_t = self.draw_edges(p_au, adj_mask, last)
 
             if self.has_node_types:
-                p_xu = diffusion_posterior(x_t, self.noiser.to_noisy_classes(p_x1), self.node_transitions,
-                                           alpha_bar_t, alpha_bar_u)
+                p_xu = posterior(x_t, self.noiser.to_noisy_classes(p_x1), self.node_transitions,
+                                 alpha_bar_t, alpha_bar_u)
                 if last:
                     p_xu = self.drop_mask_class(p_xu)
-                x_t = sample_nodes(p_xu, node_mask)
+                x_t = self.draw_nodes(p_xu, node_mask, last)
 
         x_1 = self.noiser.from_noisy_classes(x_t) if self.has_node_types else x_t
         return x_1, self.noiser.from_noisy_classes(a_t)
@@ -146,16 +182,17 @@ class Sampler:
         x_t, a_t = self.sample_prior(node_mask)
 
         for k in range(self.T):
+            last = k == self.T - 1
             alpha_bar_t = self.noiser.get_alpha_bar(k / self.T)
             alpha_bar_u = self.noiser.get_alpha_bar((k + 1) / self.T)
             p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, alpha_bar_t)
 
             step = ((alpha_bar_u - alpha_bar_t) / (1 - alpha_bar_t)).to(self.device)
             p_a = a_t + step * (p_a1 - a_t)
-            a_t = sample_edges(p_a / p_a.sum(-1, keepdim=True), adj_mask)
+            a_t = self.draw_edges(p_a / p_a.sum(-1, keepdim=True), adj_mask, last)
             if self.has_node_types:
                 p_x = x_t + step * (p_x1 - x_t)
-                x_t = sample_nodes(p_x / p_x.sum(-1, keepdim=True), node_mask)
+                x_t = self.draw_nodes(p_x / p_x.sum(-1, keepdim=True), node_mask, last)
 
         return x_t, a_t
 
@@ -170,6 +207,8 @@ class Sampler:
 
     def sample_prior(self, node_mask):
         """G_0: every node and edge is drawn from the prior (nodes without types are left at 1)."""
+        if self.dirichlet:
+            return self.noiser.sample_prior(node_mask, self.n_node_types, self.n_edge_types)
         bs, n = node_mask.shape
         adj_mask = get_edge_mask(node_mask)
         if self.has_node_types:
@@ -179,23 +218,50 @@ class Sampler:
         a = sample_edges(self.edge_transitions.prior.expand(bs, n, n, -1), adj_mask)
         return x, a
 
-    def predict_clean_graph(self, x_t, a_t, node_mask, alpha_bar):
-        """Denoiser prediction p(G_1 | G_t), as probabilities over the data classes."""
+    def predict_clean_graph(self, x_t, a_t, node_mask, alpha_bar, target='denoiser'):
+        """
+        Prediction of G_1 from G_t in the target parametrization, 'denoiser' p(z_1 | G_t) or 'cavity'
+        p(z_1 | G_t without z_t), as probabilities over the data classes. The output of the model
+        (training_method) is converted when it differs.
+        """
         x_in = self.noiser.add_noise_level(x_t, alpha_bar)
         x_in, a_in = self.extra_features(x_in, a_t, node_mask)
         out = self.model(x_in, a_in, node_mask)
+        source = self.training_method
         if len(out) == 3:  # multi-mode denoiser
-            return select_mode(out, self.hyp_selection)
-        x_logits, a_logits = out
-
-        p_x = x_logits.softmax(-1)
-        if a_logits.size(-1) == 1:
-            # Binary edges: the single output is the logit of 'no edge' (class 0)
-            p_no_edge = a_logits.sigmoid()
-            p_a = torch.cat((p_no_edge, 1 - p_no_edge), dim=-1)
+            mode_logits, x_logits, a_logits = out
+            if self.hyp_selection == 'average':
+                # The mixture is an average of the modes' denoisers: convert each mode before averaging
+                x_logits, a_logits = self.convert(x_logits, to_class_logits(a_logits), x_t, a_t, alpha_bar,
+                                                  source, 'denoiser')
+                source = 'denoiser'
+            p_x, p_a = select_mode((mode_logits, x_logits, a_logits), self.hyp_selection)
+            x_logits, a_logits = p_x.clamp_min(1e-30).log(), p_a.clamp_min(1e-30).log()
         else:
-            p_a = a_logits.softmax(-1)
-        return p_x, p_a
+            # Binary edges: the single output is the logit of 'no edge' (class 0)
+            x_logits, a_logits = out
+            a_logits = to_class_logits(a_logits)
+        x_logits, a_logits = self.convert(x_logits, a_logits, x_t, a_t, alpha_bar, source, target)
+        return x_logits.softmax(-1), a_logits.softmax(-1)
+
+    def convert(self, x_logits, a_logits, x_t, a_t, alpha_bar, source, target):
+        """Node and edge logits from the source to the target parametrization (nodes only if they have types)."""
+        if self.has_node_types:
+            x_logits = self.noiser.convert_parametrization(x_logits, x_t, alpha_bar, 'node', source, target)
+        a_logits = self.noiser.convert_parametrization(a_logits, a_t, alpha_bar, 'edge', source, target)
+        return x_logits, a_logits
+
+    def draw_nodes(self, probs, node_mask, last):
+        """Samples the nodes, or takes their most likely class at the last step with greedy_last_step."""
+        if last and self.greedy_last_step:
+            return argmax_nodes(probs, node_mask)
+        return sample_nodes(probs, node_mask)
+
+    def draw_edges(self, probs, adj_mask, last):
+        """Samples the edges, or takes their most likely class at the last step with greedy_last_step."""
+        if last and self.greedy_last_step:
+            return argmax_edges(probs, adj_mask)
+        return sample_edges(probs, adj_mask)
 
     def drop_mask_class(self, p):
         """At the last step nothing may stay masked: remove the mask class and renormalize."""
@@ -205,10 +271,41 @@ class Sampler:
         return p / p.sum(-1, keepdim=True)
 
 
+def argmax_nodes(probs, node_mask):
+    """One-hot most likely class of `probs` (bs, n, k) for the existing nodes, zeros elsewhere."""
+    return F.one_hot(probs.argmax(-1), probs.size(-1)).float() * node_mask.unsqueeze(-1)
+
+
+def argmax_edges(probs, adj_mask):
+    """Symmetric one-hot most likely class of `probs` (bs, n, n, k): the upper triangle is decoded and mirrored."""
+    idx = probs.argmax(-1).triu(1)
+    idx = idx + idx.transpose(1, 2)
+    return F.one_hot(idx, probs.size(-1)).float() * adj_mask.unsqueeze(-1)
+
+
 def keep_unmasked(z_t, z_1):
     """Masking prior: returns z_t where it is not masked (last class) and z_1 elsewhere, over the noisy classes."""
     is_masked = z_t[..., -1:].bool()
     return torch.where(is_masked, z_1, z_t[..., :-1])
+
+
+def cavity_posterior(z_t, c_z1, transitions, alpha_bar_t, alpha_bar_u):
+    """
+    p(z_u | z_t) ∝ q(z_t | z_u) sum_{z_1} c(z_1) q(z_u | z_1): the plug-in posterior q(z_u | z_t, z_1 = c) with the
+    cavity c(z_1) = p(z_1 | G_t without z_t). Equal to diffusion_posterior with the denoiser
+    p(z_1 | G_t) ∝ c(z_1) q(z_t | z_1), since q(z_u | z_t, z_1) = q(z_t | z_u) q(z_u | z_1) / q(z_t | z_1).
+
+    Args:
+        z_t: (..., k) one-hot noisy nodes or edges.
+        c_z1: (..., k) cavity, over the noisy classes.
+    Returns:
+        (..., k) distribution of z_u.
+    """
+    Q_tu = transitions.get_Q(alpha_bar_t / alpha_bar_u)   # Q_tu[i, j] = q(z_t = j | z_u = i)
+    Q_u = transitions.get_Q(alpha_bar_u)                  # Q_u[i, j] = q(z_u = j | z_1 = i)
+    p_zu = (z_t @ Q_tu.T) * (c_z1 @ Q_u)                  # (..., k_u)
+    p_zu[p_zu.sum(-1) == 0] = 1e-5
+    return p_zu / p_zu.sum(-1, keepdim=True)
 
 
 def diffusion_posterior(z_t, p_z1, transitions, alpha_bar_t, alpha_bar_u):

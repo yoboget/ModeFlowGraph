@@ -16,7 +16,7 @@ model:
   mlp_n_layers: 3
   normalization: layer_norm
   T: 128
-  prior: marginal # 'marginal' or 'masking'
+  prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
   spectral_embeddings: False
@@ -24,7 +24,7 @@ extra_features:
   graph_size: True
   molecular_feat: False
   cycles: False
-  rrwp: True
+  rrwp: False
   rrwp_k: 5
 
 sampling:
