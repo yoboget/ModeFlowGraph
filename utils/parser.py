@@ -72,7 +72,7 @@ def parse_args():
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )
