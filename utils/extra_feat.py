@@ -9,7 +9,9 @@ class ExtraFeatures:
         self.cycles = config.extra_features.cycles
         self.rrwp = config.extra_features.rrwp
         self.rrwp_k = config.extra_features.rrwp_k
-        self.n_features = 2 * self.k + self.graph_size + self.rrwp_k + 2 * self.molecular_feat
+        # graph_size feature: n / max_num_nodes, independent of the padding of the batch
+        self.max_num_nodes = config.data.max_num_nodes
+        self.n_features = 2 * self.k + self.graph_size + self.rrwp * self.rrwp_k + 2 * self.molecular_feat
         if self.cycles:
             self.n_features += 3
             self.ncycles = NodeCycleFeatures()
@@ -42,7 +44,7 @@ class ExtraFeatures:
             eigen_feat, eig_vals = self.eigen_features_dense(A, mask)
             X_feat = torch.cat((X_feat, eigen_feat, eig_vals.repeat(1, mask.size(-2), 1)), dim=-1)
         if self.graph_size:
-            n_nodes = mask.sum(-2, keepdim=True)/mask.size(1)
+            n_nodes = mask.sum(-2, keepdim=True) / self.max_num_nodes
             X_feat = torch.cat((X_feat, n_nodes.repeat(1, mask.size(-2), 1)), dim=-1)
         if self.molecular_feat:
             charge, valencies = self.molecular_features(X, A)

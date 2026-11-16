@@ -11,7 +11,8 @@ def get_edge_mask(mask, mask_diag=True):
         edge_mask = edge_mask * mask_diag
     return edge_mask.bool()
 
-def batch_to_dense(batch, max_num_nodes):
+def batch_to_dense(batch, max_num_nodes=None):
+    """Dense node / edge tensors padded to max_num_nodes, or to the largest graph of the batch if None."""
     X, mask = to_dense_batch(batch.x, batch=batch.batch, max_num_nodes=max_num_nodes)
     A = to_dense_adj(batch.edge_index, edge_attr=batch.edge_attr, batch=batch.batch,
                      max_num_nodes=max_num_nodes)

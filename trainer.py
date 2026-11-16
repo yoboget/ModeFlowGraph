@@ -46,6 +46,12 @@ class Trainer:
         # Extract configuration variables
         self.epochs = config.training.epochs
         self.max_num_nodes = config.data.max_num_nodes
+        # Training / validation batches are padded to their largest graph, unless the model depends on the padding
+        # (statistics over all node slots: batch_norm, graph_norm, DiGress's global features), which then needs the
+        # same padding as the sampler, max_num_nodes.
+        padding_invariant = (config.model.architecture != 'digress'
+                             and config.model.normalization not in ('batch_norm', 'graph_norm'))
+        self.pad_to = None if padding_invariant else self.max_num_nodes
 
         # Define Logger
         # num_modes > 1 (0 otherwise): 'mode': commitment loss (wta) or responsibility entropy (mixture)
@@ -125,7 +131,7 @@ class Trainer:
             self.opt.zero_grad()
             self.denoiser.train()
         # PREP
-        X, A, mask = batch_to_dense(batch, max_num_nodes=self.max_num_nodes)
+        X, A, mask = batch_to_dense(batch, max_num_nodes=self.pad_to)
         adj_mask = get_edge_mask(mask)
 
         # NOISING: t ~ U(0, 1) (for the 'dirichlet' prior, alpha_bar is t itself)
