@@ -15,7 +15,7 @@ model:
   n_layers: 8
   mlp_n_layers: 3
   normalization: layer_norm
-  T: 128
+  T: 256
   prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 5
 
 sampling:
-  id: 'sid'
+  id: 'quantile_map'
 
 log:
   n_loggin_steps: 1000
