@@ -70,7 +70,7 @@ def get_save_dir():
 
 
 def save_model(metric, best_run, to_save, step, save_name,
-               minimize=True):
+               minimize=True, meta=None):
     denoiser, opt = to_save
 
     if save_name not in best_run:
@@ -89,6 +89,7 @@ def save_model(metric, best_run, to_save, step, save_name,
             'iteration': step,
             'denoiser': denoiser.state_dict(),
             'optimizer': opt.state_dict(),
-            'metric': float(best_run[save_name])},
+            'metric': float(best_run[save_name]),
+            'meta': meta},
             os.path.join(save_dir, f'best_run_{save_name}.pt'))
     return best_run

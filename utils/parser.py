@@ -66,13 +66,25 @@ def parse_args():
 
     parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=3., help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
                          "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
     parser.add_argument(
+        "--input", type=str, choices=['state', 'sufficient'],
+        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+                              "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
+                              "(see utils/model_input.py)"
+    )
+
+    parser.add_argument(
+        "--time_input", action=argparse.BooleanOptionalAction,
+        default=False, help="--input sufficient: also give the noise level to the denoiser (ablation)"
+    )
+
+    parser.add_argument(
         "--schedule_c", type=float,
-        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(

@@ -8,10 +8,11 @@ from torch_geometric.data import Batch
 from utils.extra_feat import ExtraFeatures
 from utils.noising import NoiserDense, NoiserDirichlet, get_distribution
 from utils.func import batch_to_dense, get_edge_mask
+from utils.model_input import ModelInput
 from utils.modes import mode_loss, to_class_logits
 from utils.node_distribution import get_num_nodes_distribution
 from eval.metrics import SamplingMetrics
-from models.loaders import load_denoiser
+from models.loaders import load_denoiser, checkpoint_meta
 from logger import RunningMetric, save_model
 from sample import Sampler
 
@@ -58,15 +59,21 @@ class Trainer:
         ### NOISING AND SAMPLING ###
         node_marginals, edge_marginals = get_distribution(self.loaders['train'], config.dataset)
         if self.prior == 'dirichlet':
-            assert self.training_method == 'denoiser', "The 'dirichlet' prior only supports training_method 'denoiser'"
             self.noiser = NoiserDirichlet(config.model.T, scale=config.model.get('dirichlet_scale', 3.))
         else:
             self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals,
                                       schedule_c=config.model.get('schedule_c', 2.))
 
+        # Denoiser input: the noisy state, or the sufficient statistics phi (see utils/model_input.py)
+        self.model_input = ModelInput(self.noiser, self.extra_features, config.model.get('input', 'state'),
+                                      time_input=config.model.get('time_input', False),
+                                      node_marginals=node_marginals, edge_marginals=edge_marginals)
+        # Saved with each checkpoint, checked when it is loaded (models/loaders.py)
+        self.meta = checkpoint_meta(config)
+
         self.sampling_method = config.sampling.id
         num_nodes_distribution = get_num_nodes_distribution(self.loaders, self.max_num_nodes, config.dataset)
-        self.sampler = Sampler(self.noiser, self.extra_features, num_nodes_distribution, self.max_num_nodes,
+        self.sampler = Sampler(self.noiser, self.model_input, num_nodes_distribution, self.max_num_nodes,
                                n_node_types=len(node_marginals), batch_size=config.log.sampling_batch_size,
                                device=self.device, hyp_selection=config.sampling.get('hyp_selection', 'sample'),
                                training_method=self.training_method,
@@ -101,13 +108,17 @@ class Trainer:
                 for batch in self.loaders['val']:
                     self.fit(batch.to(self.device), train=False)
                 val_metrics = self.metrics.log(self.step, key='val', times=starting_time)
+                # Best validation loss (EMA model), checked every epoch
+                self.best_run = save_model(val_metrics['loss'], best_run=self.best_run,
+                                           to_save=(self.denoiser_ema, self.opt), step=self.step, save_name='loss',
+                                           meta=self.meta)
 
                 # SAMPLE EMA MODEL
                 if self.epoch % self.n_logging_epochs == 0:
                     X, A, mask, mask_adj = self.sampler(self.val_size, self.denoiser_ema, method=self.sampling_method)
                     sampling_metrics = self.eval_samples(X, A, mask, mask_adj, step=self.step, epoch=self.epoch,
                                                          ema=True)
-                    self.save_model((self.denoiser_ema, self.opt), sampling_metrics, val_metrics['loss'], ema=True)
+                    self.save_model((self.denoiser_ema, self.opt), sampling_metrics, ema=True)
 
     def fit(self, batch: Batch, train: bool = True):
         if train:
@@ -120,8 +131,7 @@ class Trainer:
         # NOISING: t ~ U(0, 1) (for the 'dirichlet' prior, alpha_bar is t itself)
         alpha_bar = self.noiser.get_alpha_bar(torch.rand(X.size(0), device=self.device))
         X_noisy, A_noisy, (noised_nodes, noised_edges) = self.noiser(X, A, mask, alpha_bar)
-        X_in = self.noiser.add_noise_level(X_noisy, alpha_bar)
-        X_in, A_in = self.extra_features(X_in, A_noisy, mask)
+        X_in, A_in = self.model_input(X_noisy, A_noisy, mask, alpha_bar)
 
         model = self.denoiser if train else self.denoiser_ema
         out = model(X_in, A_in, mask)
@@ -195,20 +205,20 @@ class Trainer:
             update_ema(self.denoiser, self.denoiser_ema)
         self.metrics.step(to_log, train)
 
-    def save_model(self, to_save, metrics, loss, ema=False):
+    def save_model(self, to_save, metrics, ema=False):
+        """Best checkpoints on the sampling metrics (the best validation loss is saved every epoch in train)."""
         suffix = '_ema' if ema else ''
         if self.dataset in ['zinc', 'qm9', 'qm9H']:
             for name in ['nspdk', 'fcd']:
                 self.best_run = save_model(metrics[name], best_run=self.best_run, to_save=to_save,
-                                           step=self.step, save_name=name + suffix)
+                                           step=self.step, save_name=name + suffix, meta=self.meta)
         else:
             self.best_run = save_model(metrics['avg'], best_run=self.best_run, to_save=to_save,
-                                       step=self.step, save_name='avg' + suffix)
+                                       step=self.step, save_name='avg' + suffix, meta=self.meta)
             if 'valid' in metrics:
                 self.best_run = save_model(metrics['valid'], best_run=self.best_run, to_save=to_save,
-                                           step=self.step, save_name='valid' + suffix, minimize=False)
-        self.best_run = save_model(loss, best_run=self.best_run, to_save=to_save,
-                                   step=self.step, save_name='loss')
+                                           step=self.step, save_name='valid' + suffix, minimize=False,
+                                           meta=self.meta)
 
 
 @torch.no_grad()

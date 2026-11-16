@@ -45,7 +45,7 @@ def main() -> None:
         wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb)
         times = []
 
-        for r in [128]:  # sweep over the number of sampling steps T
+        for r in [32, 64, 128]:  # sweep over the number of sampling steps T
             config.model.T = r
             dataloader = get_dataset(config)
             trainer = Trainer(dataloader, config)
@@ -126,6 +126,8 @@ def update_config(config, dataset, work_type, args):
     config.model.hyp_temperature = args.hyp_temperature
     config.model.schedule_c = args.schedule_c
     config.model.dirichlet_scale = args.dirichlet_scale
+    config.model.input = args.input
+    config.model.time_input = args.time_input
     config.model.training_method = args.training_method
     config.sampling.sampling_method = args.sampling_method
     config.sampling.hyp_selection = args.hyp_selection

@@ -17,11 +17,16 @@ greedy_last_step, it takes the most likely class instead (argmax of p(z_1 | G_t)
 mirrored).
 
 The denoiser outputs the denoiser or the cavity (training_method); it is converted to the parametrization each
-sampler uses when they differ (NoiserDense.convert_parametrization): 'sid' and 'dfm' use the denoiser, 'dif' the
-sampling_method.
+sampler uses when they differ (NoiserDense.convert_parametrization): 'sid', 'dfm' and 'quantile_map' use the denoiser,
+'dif' the sampling_method. Its input is the noisy state or the sufficient statistics of G_t (utils/model_input.py).
 
-With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for each element and only 'sid' is
-available: predict G_1 from G_t, sample it, and noise it again with the Dirichlet path at u.
+With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for each element. Two samplers:
+    - 'sid': predict G_1 from G_t, sample it, and noise it again with the Dirichlet path at u.
+    - 'quantile_map': deterministic transport along the Dirichlet path (the 'cdf_trick' of Dirichlet flow matching,
+             see utils.noising.quantile_map): z_u = sum_i p(z_1 = i | G_t) T_i(z_t), where T_i maps
+             Dir(1 + alpha(t) e_i) onto Dir(1 + alpha(u) e_i) through the quantiles of the Beta marginal of z_i.
+             Only the initial noise and the last step (a draw from the prediction, or its argmax with
+             greedy_last_step) are random.
 
 See utils/noising.py for the dense graph representation and the priors.
 """
@@ -31,17 +36,18 @@ from torch.distributions.categorical import Categorical
 
 from utils.func import get_edge_mask
 from utils.modes import select_mode, to_class_logits
-from utils.noising import MarginalUniformTransition, PARAMETRIZATIONS, sample_nodes, sample_edges
+from utils.noising import (MarginalUniformTransition, PARAMETRIZATIONS, BetaQuantileTable, quantile_map,
+                           sample_nodes, sample_edges, symmetrize_upper)
 
 
 class Sampler:
-    def __init__(self, noiser, extra_features, num_nodes_distribution, max_num_nodes, n_node_types,
+    def __init__(self, noiser, model_input, num_nodes_distribution, max_num_nodes, n_node_types,
                  batch_size, device, hyp_selection='sample', training_method='denoiser',
                  sampling_method='denoiser', greedy_last_step=False, n_edge_types=None):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
-            extra_features: ExtraFeatures, appended to the denoiser input (as during training).
+            model_input: ModelInput, builds the denoiser input from G_t (as during training).
             num_nodes_distribution: (max_num_nodes + 1,) distribution of the number of nodes.
             n_node_types: number of node types (1 for graphs without node types).
             batch_size: number of graphs generated in parallel.
@@ -57,7 +63,7 @@ class Sampler:
         self.sampling_method = sampling_method
         self.noiser = noiser
         self.T = noiser.T
-        self.extra_features = extra_features
+        self.model_input = model_input
         self.num_nodes_distribution = num_nodes_distribution.to(device)
         self.max_num_nodes = max_num_nodes
         self.has_node_types = n_node_types > 1
@@ -71,8 +77,8 @@ class Sampler:
         self.dirichlet = noiser.prior == 'dirichlet'
         if self.dirichlet:
             assert n_edge_types is not None, "The 'dirichlet' prior needs n_edge_types"
-            assert training_method == 'denoiser', "The 'dirichlet' prior only supports training_method 'denoiser'"
             self.node_transitions = self.edge_transitions = None
+            self.node_table = self.edge_table = None    # built on the first 'quantile_map' call
         else:
             self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
             self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
@@ -87,11 +93,14 @@ class Sampler:
             x: (n_samples, n) node types, a: (n_samples, n, n) edge types (0 = no edge),
             node_mask: (n_samples, n), adj_mask: (n_samples, n, n).
         """
-        samplers = {'sid': self.sample_sid, 'dif': self.sample_dif, 'dfm': self.sample_dfm}
+        samplers = {'sid': self.sample_sid, 'dif': self.sample_dif, 'dfm': self.sample_dfm,
+                    'quantile_map': self.sample_quantile_map}
         if method not in samplers:
             raise NotImplementedError(f'Sampling method {method} not implemented. Available: {list(samplers)}')
-        if self.dirichlet and method != 'sid':
-            raise NotImplementedError("The 'dirichlet' prior only supports 'sid' sampling.")
+        available = ('sid', 'quantile_map') if self.dirichlet else ('sid', 'dif', 'dfm')
+        if method not in available:
+            raise NotImplementedError(f"Sampling method {method} is not available with the '{self.noiser.prior}' "
+                                      f"prior. Available: {available}")
 
         was_training = model.training
         model.eval()
@@ -168,6 +177,30 @@ class Sampler:
         x_1 = self.noiser.from_noisy_classes(x_t) if self.has_node_types else x_t
         return x_1, self.noiser.from_noisy_classes(a_t)
 
+    def sample_quantile_map(self, node_mask):
+        """
+        Deterministic sampling of the Dirichlet path ('cdf_trick' of Dirichlet flow matching, see the module
+        docstring): from t = t_k to u = t_{k+1}, z_u = sum_i p(z_1 = i | G_t) T_i(z_t), elementwise for the nodes and
+        the edges (upper triangle, mirrored). The last step returns a draw from the prediction p(z_1 | G_t), or its
+        argmax with greedy_last_step.
+        """
+        if self.node_table is None:
+            if self.has_node_types:
+                self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
+            self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
+        adj_mask = get_edge_mask(node_mask)
+        x_t, a_t = self.sample_prior(node_mask)
+
+        for k in range(self.T):
+            p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, self.noiser.get_alpha_bar(k / self.T))
+            if k == self.T - 1:
+                x_1 = self.draw_nodes(p_x1, node_mask, last=True) if self.has_node_types else x_t
+                return x_1, self.draw_edges(p_a1, adj_mask, last=True)
+
+            a_t = symmetrize_upper(quantile_map(a_t, p_a1, self.edge_table, k)) * adj_mask.unsqueeze(-1)
+            if self.has_node_types:
+                x_t = quantile_map(x_t, p_x1, self.node_table, k) * node_mask.unsqueeze(-1)
+
     def sample_dfm(self, node_mask):
         """
         Discrete flow matching along the mixture path of the noising process:
@@ -224,8 +257,7 @@ class Sampler:
         p(z_1 | G_t without z_t), as probabilities over the data classes. The output of the model
         (training_method) is converted when it differs.
         """
-        x_in = self.noiser.add_noise_level(x_t, alpha_bar)
-        x_in, a_in = self.extra_features(x_in, a_t, node_mask)
+        x_in, a_in = self.model_input(x_t, a_t, node_mask, alpha_bar)
         out = self.model(x_in, a_in, node_mask)
         source = self.training_method
         if len(out) == 3:  # multi-mode denoiser
