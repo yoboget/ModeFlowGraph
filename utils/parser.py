@@ -12,7 +12,7 @@ def parse_args():
 
     parser.add_argument(
         "--work_type", type=str,
-        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./wandb/run-20251101_191454-tw31uawu/files', help="Path to the model directory"
+        default=None, help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -66,13 +66,13 @@ def parse_args():
 
     parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+        default=6, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
                          "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )
@@ -84,7 +84,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule_c", type=float,
-        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(

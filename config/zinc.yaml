@@ -15,7 +15,7 @@ model:
   n_layers: 8
   mlp_n_layers: 3
   normalization: layer_norm
-  T: 256
+  T: 128
   prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
