@@ -45,7 +45,7 @@ def main() -> None:
         wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb)
         times = []
 
-        for r in [32, 64, 128, 256, 512]:  # sweep over the number of sampling steps T
+        for r in [256, 512]:  # sweep over the number of sampling steps T
             config.model.T = r
             dataloader = get_dataset(config)
             trainer = Trainer(dataloader, config)
