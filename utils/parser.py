@@ -65,8 +65,15 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--temperature", type=float,
+        default=1, help="Sampling temperature tau: the prediction p(z_1 | G_t) is replaced by "
+                         "p(z_1 | G_t)^(1 / tau), renormalized (< 1 sharper, > 1 flatter, 1: the model), for all "
+                         "samplers"
+    )
+
+    parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=6, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
                          "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
@@ -84,7 +91,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule_c", type=float,
-        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(

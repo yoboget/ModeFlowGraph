@@ -3,7 +3,7 @@ data:
   max_num_nodes: 38
 
 training:
-  batch_size: 512
+  batch_size: 256
   learning_rate: 0.0005
   epochs: 1000
   val_size: 100
@@ -16,7 +16,7 @@ model:
   mlp_n_layers: 3
   normalization: layer_norm
   T: 128
-  prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
+  prior: marginal # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
   spectral_embeddings: False

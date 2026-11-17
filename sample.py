@@ -12,6 +12,10 @@ to the data (t = 1). Each step k goes from t = t_k to the next time u = t_{k+1}:
              the same distribution when c is the exact cavity.
     - 'dfm': discrete flow matching, Euler steps along the mixture path between the prior and the data.
 
+Sampling temperature tau (all samplers): the prediction p(z_1 | G_t) is replaced by p(z_1 | G_t)^(1 / tau),
+renormalized per node / edge, i.e. its logits are divided by tau (tau < 1 sharper, tau > 1 flatter, tau = 1 the
+model). It is applied to the denoiser p(z_1 | G_t); the 'cavity' used by 'dif' is derived from the tempered denoiser.
+
 In all three, the last step (u = 1, alpha_bar(u) = 1) draws each element from the prediction p(z_1 | G_t). With
 greedy_last_step, it takes the most likely class instead (argmax of p(z_1 | G_t), edges on the upper triangle and
 mirrored).
@@ -43,7 +47,7 @@ from utils.noising import (MarginalUniformTransition, PARAMETRIZATIONS, BetaQuan
 class Sampler:
     def __init__(self, noiser, model_input, num_nodes_distribution, max_num_nodes, n_node_types,
                  batch_size, device, hyp_selection='sample', training_method='denoiser',
-                 sampling_method='denoiser', greedy_last_step=False, n_edge_types=None):
+                 sampling_method='denoiser', greedy_last_step=False, n_edge_types=None, temperature=1.):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
@@ -57,6 +61,7 @@ class Sampler:
             sampling_method: the parametrization used by 'dif', 'denoiser' or 'cavity'.
             greedy_last_step: at the last step, take the argmax of the prediction instead of sampling it.
             n_edge_types: number of edge types including 'no edge' (needed by the 'dirichlet' prior).
+            temperature: sampling temperature tau > 0, p(z_1 | G_t) -> p(z_1 | G_t)^(1 / tau) renormalized.
         """
         assert training_method in PARAMETRIZATIONS and sampling_method in PARAMETRIZATIONS
         self.training_method = training_method
@@ -71,6 +76,8 @@ class Sampler:
         self.device = device
         self.hyp_selection = hyp_selection
         self.greedy_last_step = greedy_last_step
+        assert temperature > 0, f'The sampling temperature must be positive, got {temperature}'
+        self.temperature = temperature
 
         self.n_node_types = n_node_types
         self.n_edge_types = n_edge_types
@@ -255,7 +262,8 @@ class Sampler:
         """
         Prediction of G_1 from G_t in the target parametrization, 'denoiser' p(z_1 | G_t) or 'cavity'
         p(z_1 | G_t without z_t), as probabilities over the data classes. The output of the model
-        (training_method) is converted when it differs.
+        (training_method) is converted when it differs. With a temperature, the denoiser is tempered first and the
+        target derived from it.
         """
         x_in, a_in = self.model_input(x_t, a_t, node_mask, alpha_bar)
         out = self.model(x_in, a_in, node_mask)
@@ -273,6 +281,10 @@ class Sampler:
             # Binary edges: the single output is the logit of 'no edge' (class 0)
             x_logits, a_logits = out
             a_logits = to_class_logits(a_logits)
+        if self.temperature != 1.:
+            x_logits, a_logits = self.convert(x_logits, a_logits, x_t, a_t, alpha_bar, source, 'denoiser')
+            x_logits, a_logits = x_logits / self.temperature, a_logits / self.temperature
+            source = 'denoiser'
         x_logits, a_logits = self.convert(x_logits, a_logits, x_t, a_t, alpha_bar, source, target)
         return x_logits.softmax(-1), a_logits.softmax(-1)
 

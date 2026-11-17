@@ -85,6 +85,7 @@ class Trainer:
                                training_method=self.training_method,
                                sampling_method=config.sampling.get('sampling_method', 'denoiser'),
                                greedy_last_step=config.sampling.get('greedy_last_step', False),
+                               temperature=config.sampling.get('temperature', 1.),
                                n_edge_types=len(edge_marginals))
 
         ref_loader = self.loaders['test'] if self.sampling else self.loaders['val']

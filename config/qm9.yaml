@@ -36,3 +36,4 @@ log:
   n_val_samples: 1000
   sampling_batch_size: 1000
   n_samples_generation: 10000
+  path: './wandb/run-20261116_110708-nu0v78a0/files/' # Sufficient statistic with dirichlet alpha_max = 3
