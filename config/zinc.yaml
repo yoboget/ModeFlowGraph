@@ -16,7 +16,7 @@ model:
   mlp_n_layers: 3
   normalization: layer_norm
   T: 128
-  prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
+  prior: marginal # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
   spectral_embeddings: False
