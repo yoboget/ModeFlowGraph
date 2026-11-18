@@ -98,7 +98,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule_c", type=float,
-        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(
