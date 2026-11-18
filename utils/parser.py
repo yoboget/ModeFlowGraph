@@ -12,18 +12,18 @@ def parse_args():
 
     parser.add_argument(
         "--work_type", type=str,
-        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
     parser.add_argument(
         "--wandb", type=str,
-        default='on', help="If W&B is online, offline or disabled"
+        default='no', help="If W&B is online, offline or disabled"
     )
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default=None, help="Path to the model directory"
+        default='./checkpoints/zinc/dirichlet6-laqxi1ki/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -72,14 +72,21 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--pgd", action=argparse.BooleanOptionalAction,
+        default=True, help="Also compute the PolyGraph Discrepancy (eval/pgd.py, Krimmel et al. 2025): a TabPFN "
+                           "classifier's lower bound on the JS distance between generated and reference graphs. Only when sampling "
+                           "(work_type sample / train_vs_test), never during training"
+    )
+
+    parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+        default=6, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
                          "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )

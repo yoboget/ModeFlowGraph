@@ -1,4 +1,6 @@
-from eval.stats3 import eval_graph_list
+from eval.mmd import nspdk_mean_embedding, nspdk_terms
+from eval.pgd import compute_pgd, describe
+from eval.ref_cache import load_or_compute
 import fcd_torch.fcd
 from fcd_torch import FCD
 import pickle
@@ -29,8 +31,16 @@ if not hasattr(np, 'row_stack'):
     np.row_stack = np.vstack
 
 
-def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
-    """fcd_torch's Frechet distance without `sqrtm(..., disp=False)`, which newer SciPy releases removed."""
+def frechet_terms(mu1, sigma1, mu2, sigma2, eps=1e-6):
+    """
+    Frechet distance between N(mu1, sigma1) (reference) and N(mu2, sigma2) (generated) with its four terms:
+        fcd = mean + var_ref + var_gen - 2 cross_cov,
+        mean      = ||mu1 - mu2||^2                 (mean term),
+        var_ref   = Tr sigma1, var_gen = Tr sigma2  (total variances),
+        cross_cov = Tr (sigma1 sigma2)^(1/2)        (cross-covariance / fidelity term).
+    var_ref + var_gen - 2 cross_cov is the squared Bures distance between the covariances.
+    Without `sqrtm(..., disp=False)` of fcd_torch, which newer SciPy releases removed.
+    """
     mu1, mu2 = np.atleast_1d(mu1), np.atleast_1d(mu2)
     sigma1, sigma2 = np.atleast_2d(sigma1), np.atleast_2d(sigma2)
     diff = mu1 - mu2
@@ -47,7 +57,65 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
             raise ValueError(f'Imaginary component {np.max(np.abs(covmean.imag))}')
         covmean = covmean.real
 
-    return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
+    terms = {'mean': float(diff.dot(diff)), 'var_ref': float(np.trace(sigma1)), 'var_gen': float(np.trace(sigma2)),
+             'cross_cov': float(np.trace(covmean))}
+    terms['fcd'] = terms['mean'] + terms['var_ref'] + terms['var_gen'] - 2 * terms['cross_cov']
+    return terms
+
+
+def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+    """fcd_torch's Frechet distance (see frechet_terms)."""
+    return frechet_terms(mu1, sigma1, mu2, sigma2, eps)['fcd']
+
+
+def fcd_with_terms(pref, gen_smiles, device):
+    """FCD of the generated smiles against the reference statistics pref (FCD.precalc of the reference smiles), with
+    its terms (frechet_terms), nan if it fails."""
+    pgen = FCD(n_jobs=0, device=device).precalc(gen_smiles)
+    if 'mu' not in pref or 'mu' not in pgen:   # fewer than 2 molecules
+        return {k: float('nan') for k in ('fcd', 'mean', 'var_ref', 'var_gen', 'cross_cov')}
+    return frechet_terms(pref['mu'], pref['sigma'], pgen['mu'], pgen['sigma'])
+
+
+def reference_smiles(dataset):
+    """Canonical train and test smiles of the dataset ({'train': list, 'test': list}), cached on disk."""
+    def compute():
+        train_smiles, test_smiles = load_smiles(dataset=dataset)
+        return {'train': canonicalize_smiles(train_smiles), 'test': canonicalize_smiles(test_smiles)}
+    return load_or_compute(dataset, 'smiles', compute)
+
+
+def reference_stats(dataset, ref_size=None):
+    """
+    Test-set side of the metrics, cached on disk (eval/ref_cache.py):
+        - smiles: the canonical test smiles (a seeded random subset of size ref_size if given),
+        - nspdk_mean: mean NSPDK embedding of the test graphs (the first ref_size after a seeded shuffle if given),
+        - fcd: ChemNet mean and covariance ('mu', 'sigma') of the test smiles,
+        - moses: SNN / Frag / Scaf statistics of the test smiles.
+    """
+    def compute():
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        test_smiles = reference_smiles(dataset)['test']
+        with open(f'./data/{dataset}/raw/test_nx_{dataset}.pkl', 'rb') as f:
+            test_graph_list = pickle.load(f)
+        random.Random(42).shuffle(test_graph_list)
+        if ref_size is not None:
+            test_smiles = random.Random(42).sample(test_smiles, min(ref_size, len(test_smiles)))
+            test_graph_list = test_graph_list[:ref_size]
+        print(f'Test reference: {len(test_smiles)} smiles, {len(test_graph_list)} graphs')
+        return {'smiles': test_smiles,
+                'nspdk_mean': nspdk_mean_embedding(test_graph_list),
+                'fcd': FCD(n_jobs=0, device=device).precalc(test_smiles),
+                'moses': compute_intermediate_statistics(test_smiles, n_jobs=1, device=device, batch_size=512,
+                                                         pool=1)}
+    return load_or_compute(dataset, f'ref_{ref_size or "all"}', compute)
+
+
+def reference_pgd(dataset, ref_size=None):
+    """PGD descriptors of the test molecules (eval.pgd.describe), cached on disk."""
+    def compute():
+        return describe([Chem.MolFromSmiles(s) for s in reference_stats(dataset, ref_size)['smiles']], 'molecule')
+    return load_or_compute(dataset, f'pgd_{ref_size or "all"}', compute)
 
 
 fcd_torch.fcd.calculate_frechet_distance = calculate_frechet_distance
@@ -115,7 +183,7 @@ def novelty(gen, train):
     return len(gen_smiles_set - train_set) / len(gen_smiles_set)
 
 
-def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False, ref_size=None):
+def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False, ref_size=None, nspdk=True, pgd=False):
     '''
     Args:
         - gen_mols: list of (corrected) RDKit molecules
@@ -123,6 +191,9 @@ def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False, ref_s
         - validity: fraction of generated graphs that are valid molecules without valency correction
         - n_samples: number of generated graphs
         - ref_size: if given, the test reference is a random subset of this size (default: the whole test set)
+        - nspdk: compute the NSPDK MMD against the test molecules
+        - pgd: compute the PolyGraph Discrepancy against the test molecules (eval/pgd.py)
+    The test-set side of the metrics is computed once and cached on disk (reference_stats, reference_pgd).
     Return:
         - Dict with key valid, unique, novel, nspdk, fcd, ...
     '''
@@ -139,40 +210,41 @@ def mol_metric(gen_mols, dataset, validity, n_samples, test_metrics=False, ref_s
     else:
         metrics['unique'] = 0
     if test_metrics:
-        train_smiles, test_smiles = load_smiles(dataset=dataset)
-        test_smiles = canonicalize_smiles(test_smiles)
-        train_smiles = canonicalize_smiles(train_smiles)
+        ref = reference_stats(dataset, ref_size)
+        train_smiles = reference_smiles(dataset)['train']
 
         if len(gen_valid) > 0:
             metrics['novel'] = novelty(gen_valid, train_smiles)
         else:
             metrics['novel'] = 0
 
-        with open(f'./data/{dataset}/raw/test_nx_{dataset}.pkl', 'rb') as f:
-            test_graph_list = pickle.load(f)
-            random.Random(42).shuffle(test_graph_list)
+        if nspdk:
+            # nspdk (squared MMD) and its terms nspdk_within_ref, nspdk_within_gen, nspdk_cross (eval.mmd.mmd_terms)
+            gen_graphs = [G for G in mols_to_nx(gen_mols) if G.number_of_nodes() > 0]
+            if len(gen_graphs) > 0:
+                terms = nspdk_terms(ref['nspdk_mean'], nspdk_mean_embedding(gen_graphs))
+                metrics['nspdk'] = terms.pop('mmd')
+                metrics.update({f'nspdk_{k}': v for k, v in terms.items()})
+            else:
+                metrics['nspdk'] = 1
+                metrics.update({f'nspdk_{t}': float('nan') for t in ('within_ref', 'within_gen', 'cross')})
 
-        if ref_size is not None:
-            test_smiles = random.Random(42).sample(test_smiles, min(ref_size, len(test_smiles)))
-            test_graph_list = test_graph_list[:ref_size]
-            print(f'Test reference: {len(test_smiles)} smiles, {len(test_graph_list)} graphs')
-
-        if len(gen_mols) > 0:
-            metrics['nspdk'] = eval_graph_list(test_graph_list, mols_to_nx(gen_mols), methods=['nspdk'])['nspdk']
-        else:
-            metrics['nspdk'] = 1
-
-        metrics['fcd'] = FCD(n_jobs=0, device=device)(ref=test_smiles, gen=gen_smiles)
+        # fcd and its terms fcd_mean, fcd_var_ref, fcd_var_gen, fcd_cross_cov (frechet_terms)
+        fcd_terms = fcd_with_terms(ref['fcd'], gen_smiles, device)
+        metrics['fcd'] = fcd_terms.pop('fcd')
+        metrics.update({f'fcd_{k}': v for k, v in fcd_terms.items()})
 
         kwargs = {'n_jobs': 1, 'device': device, 'batch_size': len(gen_smiles)}
-        ptest = compute_intermediate_statistics(test_smiles, n_jobs=1,
-                                                device=device,
-                                                batch_size=len(gen_smiles),
-                                                pool=1)
+        ptest = ref['moses']
         metrics['SNN/Test'] = SNNMetric(**kwargs)(gen=gen_mols, pref=ptest['SNN'])
         metrics['Frag/Test'] = FragMetric(**kwargs)(gen=gen_mols, pref=ptest['Frag'])
         metrics['Scaf/Test'] = ScafMetric(**kwargs)(gen=gen_mols, pref=ptest['Scaf'])
         metrics['valid_with_corr'] = len(gen_valid) / n_samples
+
+        if pgd:
+            # pgd, pgd_descriptor and pgd_<descriptor>; generated molecules that RDKit cannot parse are dropped
+            gen_pgd = [Chem.MolFromSmiles(s) for s in gen_valid]
+            metrics.update(compute_pgd(reference_pgd(dataset, ref_size), gen_pgd, 'molecule'))
     return metrics
 
 # Code adapted from GDSS harryjo/GDSS/utils/smile_to_graph.py (only cosmetic changes)

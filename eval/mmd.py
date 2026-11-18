@@ -5,7 +5,6 @@ import numpy as np
 import pyemd
 from scipy.linalg import toeplitz
 
-from sklearn.metrics.pairwise import pairwise_kernels
 from eden.graph import vectorize
 
 # NOTES:
@@ -88,8 +87,22 @@ def disc(samples1, samples2, kernel, is_parallel=True, *args, **kwargs):
         d = 1e6
     return d
 
+def mmd_terms(within_ref, within_gen, cross):
+    """
+    Squared MMD between the reference X and the generated Y with its three terms:
+        mmd = within_ref + within_gen - 2 cross,
+        within_ref = E k(x, x'),  within_gen = E k(y, y')  (within-sample terms: average self-similarity, high for a
+                                                            homogeneous set),
+        cross      = E k(x, y)                             (cross term).
+    The averages include the diagonal k(x, x) (biased V-statistic estimator).
+    """
+    within_ref, within_gen, cross = float(within_ref), float(within_gen), float(cross)
+    return {'mmd': within_ref + within_gen - 2 * cross, 'within_ref': within_ref, 'within_gen': within_gen,
+            'cross': cross}
+
+
 def compute_mmd(samples1, samples2, kernel, is_hist=True, *args, **kwargs):
-    """ MMD between two samples
+    """ MMD between two samples (samples1: reference, samples2: generated), returned with its terms (mmd_terms)
     """
     # -------- normalize histograms into pmf --------
     if is_hist:
@@ -98,21 +111,29 @@ def compute_mmd(samples1, samples2, kernel, is_hist=True, *args, **kwargs):
     x = disc(samples1, samples1, kernel, *args, **kwargs)
     y = disc(samples2, samples2, kernel, *args, **kwargs)
     xy = disc(samples1, samples2, kernel, *args, **kwargs)
-    return x + y - 2 * xy
+    return mmd_terms(x, y, xy)
 
 ### code adapted from https://github.com/idea-iitd/graphgen/blob/master/metrics/mmd.py
-def compute_nspdk_mmd(samples1, samples2, metric, is_hist=True, n_jobs=None):
-    def kernel_compute(X, Y=None, is_hist=True, metric='linear', n_jobs=None):
-        X = vectorize(X, complexity=4, discrete=True)
-        if Y is not None:
-            Y = vectorize(Y, complexity=4, discrete=True)
-        return pairwise_kernels(X, Y, metric='linear', n_jobs=n_jobs)
+def nspdk_mean_embedding(graphs):
+    """Mean of the unit-norm NSPDK features of the graphs (node / edge attribute 'label'), a dense vector."""
+    X = vectorize(graphs, complexity=4, discrete=True)
+    return np.asarray(X.mean(axis=0)).ravel()
 
-    X = kernel_compute(samples1, is_hist=is_hist, metric=metric, n_jobs=n_jobs)
-    Y = kernel_compute(samples2, is_hist=is_hist, metric=metric, n_jobs=n_jobs)
-    Z = kernel_compute(samples1, Y=samples2, is_hist=is_hist, metric=metric, n_jobs=n_jobs)
 
-    return np.average(X) + np.average(Y) - 2 * np.average(Z)
+def nspdk_terms(ref_mean, gen_mean):
+    """NSPDK MMD terms from the mean embeddings: the kernel is linear, so the averages of the kernel matrices are dot
+    products of the mean embeddings (within_ref = ||m_ref||^2, within_gen = ||m_gen||^2, cross = <m_ref, m_gen>),
+    without computing the n x n kernel matrices."""
+    d = max(len(ref_mean), len(gen_mean))
+    ref_mean, gen_mean = np.pad(ref_mean, (0, d - len(ref_mean))), np.pad(gen_mean, (0, d - len(gen_mean)))
+    return mmd_terms(float(ref_mean @ ref_mean), float(gen_mean @ gen_mean), float(ref_mean @ gen_mean))
+
+
+def compute_nspdk_mmd(samples1, samples2, metric=None, is_hist=True, n_jobs=None):
+    """NSPDK MMD between the reference samples1 and the generated samples2, with its terms (mmd_terms). The kernel is
+    linear on unit-norm NSPDK features phi, so within_* = 1 - E||phi - mean phi||^2, one minus the total variance.
+    (metric, is_hist, n_jobs: unused, kept for compatibility.)"""
+    return nspdk_terms(nspdk_mean_embedding(samples1), nspdk_mean_embedding(samples2))
 
 
 def process_tensor(x, y):

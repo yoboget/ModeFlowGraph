@@ -10,10 +10,8 @@ from string import ascii_uppercase, digits
 
 from eval.mmd import compute_mmd, gaussian, gaussian_emd, compute_nspdk_mmd, gaussian_tv
 
-try:
-    import graph_tool.all as gt
-except ImportError:
-    pass
+# graph_tool is imported in is_sbm_graph only: its Boost.Python clashes with the pip build of RDKit when it is loaded
+# between rdkit.Chem and RDKit's descriptor modules (GetMorganFingerprintAsBitVect then rejects valid arguments)
 from scipy.stats import chi2
 
 import warnings
@@ -285,6 +283,7 @@ def is_sbm_graph(G, p_intra=0.3, p_inter=0.005, strict=True, refinement_steps=10
     """
     Check if how closely given graph matches a SBM with given probabilites by computing mean probability of Wald test statistic for each recovered parameter
     """
+    import graph_tool.all as gt
     adj = nx.adjacency_matrix(G).toarray()
     idx = adj.nonzero()
     g = gt.Graph()
@@ -429,6 +428,9 @@ METHOD_NAME_TO_FUNC = {
 # -------- Evaluate generated generic graphs --------
 def eval_graph_list(graph_ref_list, graph_pred_list, methods=None, kernel='emd'):
     """
+    Each MMD (degree, cluster, orbit, spectral, nspdk) is returned as `method` (the squared MMD) along with its terms
+    `method_within_ref`, `method_within_gen` and `method_cross` (see eval.mmd.mmd_terms).
+
     kernel: MMD kernel of the degree / cluster / orbit / spectral statistics,
         'emd': Gaussian EMD kernel, and a Gaussian kernel on the orbit counts (GraphRNN / GDSS protocol, e.g. enzymes),
         'tv':  Gaussian total-variation kernel (GRAN / SPECTRE protocol, e.g. planar and sbm).
@@ -453,6 +455,11 @@ def eval_graph_list(graph_ref_list, graph_pred_list, methods=None, kernel='emd')
                 result = METHOD_NAME_TO_FUNC[method](graph_ref_list, graph_pred_list, KERNEL=kernel)
             else:
                 result = METHOD_NAME_TO_FUNC[method](graph_ref_list, graph_pred_list)
-            results[method] = round(result, NUM)
+            if isinstance(result, dict):  # MMD with its terms (eval.mmd.mmd_terms)
+                results[method] = round(result['mmd'], NUM)
+                for term in ('within_ref', 'within_gen', 'cross'):
+                    results[f'{method}_{term}'] = result[term]
+            else:  # nan when the statistics could not be computed
+                results[method] = round(result, NUM)
             print(f'{method:10s}' + ' : ' + f'{results[method]:.6f}')
     return results

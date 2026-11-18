@@ -1,15 +1,16 @@
+import importlib.util
+
 import wandb
 
 from eval.mol_metrics import gen_mol, mol_metric
+from eval.pgd import compute_pgd, describe
 from eval.stats3 import eval_graph_list, eval_fraction_unique_non_isomorphic_valid, is_planar_graph, is_sbm_graph
 from utils.utils import get_networkx_from_dense
 from utils.func import batch_to_dense
 
-try:
-    import graph_tool.all  # noqa: F401  (only needed by is_sbm_graph)
-    GT = True
-except ImportError:
-    GT = False
+# graph_tool is only needed by is_sbm_graph, which imports it (see eval/stats3.py): check that it is installed without
+# importing it here
+GT = importlib.util.find_spec('graph_tool') is not None
 
 
 # MMD kernel of the generic graph statistics, following the protocol under which each dataset is usually reported
@@ -17,12 +18,17 @@ MMD_KERNELS = {'enzymes': 'emd', 'planar': 'tv', 'sbm': 'tv'}
 
 
 class SamplingMetrics:
-    def __init__(self, dataset, max_num_nodes, sampling, ref_loader=None, ref_size=None):
-        """ref_size: if given, the test reference is a random subset of this size (default: the whole test set)."""
+    def __init__(self, dataset, max_num_nodes, sampling, ref_loader=None, ref_size=None, nspdk=True, pgd=False):
+        """ref_size: if given, the test reference is a random subset of this size (default: the whole test set).
+        nspdk: compute the NSPDK MMD (molecules).
+        pgd: compute the PolyGraph Discrepancy (eval/pgd.py)."""
         self.dataset = dataset
+        self.nspdk = nspdk
+        self._pgd_ref = None   # PGD descriptors of the generic reference graphs, computed on first use
         self.ref_size = ref_size
         self.max_num_nodes = max_num_nodes
         self.sampling = sampling
+        self.pgd = pgd
         if dataset in ['planar', 'sbm', 'enzymes']:
             self.val_loader = ref_loader
             batch = next(iter(ref_loader))
@@ -57,13 +63,17 @@ class SamplingMetrics:
         gen_mols, num_no_correct = gen_mol(annots, adjs, mask, self.dataset)
         n_samples = annots.size(0)
         return mol_metric(gen_mols, self.dataset, num_no_correct / n_samples, n_samples, test_metrics=True,
-                          ref_size=self.ref_size)
+                          ref_size=self.ref_size, nspdk=self.nspdk, pgd=self.pgd)
 
     def generic_graph_metrics(self, gen_graphs, dataset):
-        metrics = eval_graph_list(self.ref_graphs, gen_graphs, methods=['degree', 'cluster', 'orbit', 'spectral'],
-                                  kernel=MMD_KERNELS[dataset])
-        avg = sum(metrics.values()) / len(metrics.values())
+        methods = ['degree', 'cluster', 'orbit', 'spectral']
+        metrics = eval_graph_list(self.ref_graphs, gen_graphs, methods=methods, kernel=MMD_KERNELS[dataset])
+        avg = sum(metrics[m] for m in methods) / len(methods)    # the MMDs only, not their terms
         metrics['avg'] = avg
+        if self.pgd:
+            if self._pgd_ref is None:
+                self._pgd_ref = describe(self.ref_graphs, 'graph')
+            metrics.update(compute_pgd(self._pgd_ref, gen_graphs, 'graph'))
         if dataset == 'planar':
             u, n, v = eval_fraction_unique_non_isomorphic_valid(gen_graphs, self.ref_graphs,
                                                                 validity_func=is_planar_graph)

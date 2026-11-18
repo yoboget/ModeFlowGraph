@@ -89,7 +89,9 @@ class Trainer:
                                n_edge_types=len(edge_marginals))
 
         ref_loader = self.loaders['test'] if self.sampling else self.loaders['val']
-        self.eval_samples = SamplingMetrics(config.dataset, self.max_num_nodes, self.sampling, ref_loader=ref_loader)
+        # NSPDK and PGD are slow: computed only when sampling from a trained model, not during training
+        self.eval_samples = SamplingMetrics(config.dataset, self.max_num_nodes, self.sampling, ref_loader=ref_loader,
+                                            nspdk=self.sampling, pgd=self.sampling and config.log.get('pgd', False))
         self.val_size = config.log.n_val_samples
 
         self.dataset = config.dataset
@@ -216,7 +218,7 @@ class Trainer:
         """Best checkpoints on the sampling metrics (the best validation loss is saved every epoch in train)."""
         suffix = '_ema' if ema else ''
         if self.dataset in ['zinc', 'qm9', 'qm9H']:
-            for name in ['nspdk', 'fcd']:
+            for name in [m for m in ('nspdk', 'fcd') if m in metrics]:   # no nspdk during training
                 self.best_run = save_model(metrics[name], best_run=self.best_run, to_save=to_save,
                                            step=self.step, save_name=name + suffix, meta=self.meta)
         else:

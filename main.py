@@ -45,7 +45,7 @@ def main() -> None:
         wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb)
         times = []
 
-        for r in [128, 256, 512]:  # sweep over the number of sampling steps T
+        for r in [32, 256, 512]:  # sweep over the number of sampling steps T
             config.model.T = r
             dataloader = get_dataset(config)
             trainer = Trainer(dataloader, config)
@@ -62,6 +62,9 @@ def main() -> None:
         keys = runs[0].keys()
         latex_format = {}
         for key in keys:
+            if isinstance(runs[0][key], str):  # e.g. pgd_descriptor
+                print(f'{key}: {[run[key] for run in runs]}')
+                continue
             val = []
             for run in runs:
                 val.append(run[key])
@@ -101,7 +104,7 @@ def main() -> None:
         X, A, mask, mask_adj = sample_training_graphs(dataloader['train'].dataset, n, config.data.max_num_nodes)
         print(f'Evaluating {X.size(0)} training graphs against the test set')
         eval_samples = SamplingMetrics(dataset, config.data.max_num_nodes, sampling=True,
-                                       ref_loader=dataloader['test'], ref_size=n)
+                                       ref_loader=dataloader['test'], ref_size=n, pgd=config.log.pgd)
         eval_samples(X, A, mask, mask_adj)
         wandb.finish()
 
@@ -133,6 +136,7 @@ def update_config(config, dataset, work_type, args):
     config.sampling.hyp_selection = args.hyp_selection
     config.sampling.greedy_last_step = args.greedy_last_step
     config.sampling.temperature = args.temperature
+    config.log.pgd = args.pgd
     return config
 
 
