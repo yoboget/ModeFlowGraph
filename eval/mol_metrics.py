@@ -96,12 +96,16 @@ def reference_stats(dataset, ref_size=None):
     def compute():
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         test_smiles = reference_smiles(dataset)['test']
+        # test_nx_<dataset>[i] is the graph of the i-th test smiles of the raw file; load_smiles shuffles the qm9H smiles
         with open(f'./data/{dataset}/raw/test_nx_{dataset}.pkl', 'rb') as f:
             test_graph_list = pickle.load(f)
-        random.Random(42).shuffle(test_graph_list)
-        if ref_size is not None:
-            test_smiles = random.Random(42).sample(test_smiles, min(ref_size, len(test_smiles)))
-            test_graph_list = test_graph_list[:ref_size]
+        if dataset == 'qm9H':
+            random.Random(42).shuffle(test_graph_list)
+        assert len(test_graph_list) == len(test_smiles), (len(test_graph_list), len(test_smiles))
+        if ref_size is not None:   # the same random subset of molecules for every metric
+            idx = random.Random(42).sample(range(len(test_smiles)), min(ref_size, len(test_smiles)))
+            test_smiles = [test_smiles[i] for i in idx]
+            test_graph_list = [test_graph_list[i] for i in idx]
         print(f'Test reference: {len(test_smiles)} smiles, {len(test_graph_list)} graphs')
         return {'smiles': test_smiles,
                 'nspdk_mean': nspdk_mean_embedding(test_graph_list),

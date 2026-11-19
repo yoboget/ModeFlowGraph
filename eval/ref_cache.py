@@ -12,7 +12,7 @@ import os
 import pickle
 import time
 
-VERSION = 1
+VERSION = 3
 
 _memory = {}
 

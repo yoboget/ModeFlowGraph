@@ -1,6 +1,8 @@
 import concurrent.futures
 from functools import partial
 
+import zlib
+
 import numpy as np
 import pyemd
 from scipy.linalg import toeplitz
@@ -114,9 +116,29 @@ def compute_mmd(samples1, samples2, kernel, is_hist=True, *args, **kwargs):
     return mmd_terms(x, y, xy)
 
 ### code adapted from https://github.com/idea-iitd/graphgen/blob/master/metrics/mmd.py
+def _stable_label(label):
+    """An integer standing for the label, the same in every process (zlib.crc32 of its repr for non-integers)."""
+    return label if isinstance(label, (int, np.integer)) else zlib.crc32(repr(label).encode())
+
+
+def _stable_labels(graph):
+    """Copy of the graph with integer node / edge labels (_stable_label)."""
+    graph = graph.copy()
+    for _, data in graph.nodes(data=True):
+        if 'label' in data:
+            data['label'] = _stable_label(data['label'])
+    for *_, data in graph.edges(data=True):
+        if 'label' in data:
+            data['label'] = _stable_label(data['label'])
+    return graph
+
+
 def nspdk_mean_embedding(graphs):
-    """Mean of the unit-norm NSPDK features of the graphs (node / edge attribute 'label'), a dense vector."""
-    X = vectorize(graphs, complexity=4, discrete=True)
+    """Mean of the unit-norm NSPDK features of the graphs (node / edge attribute 'label'), a dense vector.
+    eden hashes the labels with Python's hash(), which is randomized per process for strings (e.g. atom symbols): the
+    features of two processes would not share their coordinates (which breaks the cached reference embedding, see
+    eval/ref_cache.py). The labels are mapped to integers first, whose hash is the same in every process."""
+    X = vectorize([_stable_labels(g) for g in graphs], complexity=4, discrete=True)
     return np.asarray(X.mean(axis=0)).ravel()
 
 

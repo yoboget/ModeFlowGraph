@@ -34,7 +34,8 @@ def main() -> None:
     config = update_config(config, dataset, work_type, args)
 
     if work_type == 'train':
-        wandb.init(project=f'ModeFlowGraph_{dataset}', config=config, mode=args.wandb)
+        wandb.init(project=f'ModeFlowGraph_{dataset}', config=config, mode=args.wandb,
+                   name=run_name(config))
         dataloader = get_dataset(config)
         trainer = Trainer(dataloader, config)
         trainer.train()
@@ -42,7 +43,8 @@ def main() -> None:
     elif work_type == 'sample':
         torch.manual_seed(42)
         runs = []
-        wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb)
+        wandb.init(project=f'ModeFlowGraph_{dataset}_sample', config=config, mode=args.wandb,
+                   name=run_name(config))
         times = []
 
         for r in [32, 64, 128, 256, 512]:  # sweep over the number of sampling steps T
@@ -98,7 +100,8 @@ def main() -> None:
         # reference values of the metrics: training graphs evaluated against the test set, both of size
         # n_samples_generation
         torch.manual_seed(42)
-        wandb.init(project=f'sid_{dataset}_train_vs_test', config=config, mode=args.wandb)
+        wandb.init(project=f'sid_{dataset}_train_vs_test', config=config, mode=args.wandb,
+                   name=run_name(config))
         dataloader = get_dataset(config)
         n = config.log.n_samples_generation
         X, A, mask, mask_adj = sample_training_graphs(dataloader['train'].dataset, n, config.data.max_num_nodes)
@@ -118,6 +121,15 @@ def sample_training_graphs(train_set, n, max_num_nodes):
     X, A, mask = batch_to_dense(batch, max_num_nodes=max_num_nodes)
     adj_mask = get_edge_mask(mask)
     return X.argmax(-1) * mask, A.argmax(-1) * adj_mask, mask, adj_mask
+
+
+def run_name(config):
+    """wandb run name: <prior>_<sampler>_<input>, then the Dirichlet scale (dirichlet prior) or the schedule exponent c
+    (discrete priors), e.g. dirichlet_quantile_map_sufficient_scale6, marginal_sid_state_c2."""
+    name = f'{config.model.prior}_{config.sampling.id}_{config.model.input}'
+    if config.model.prior == 'dirichlet':
+        return f'{name}_scale{config.model.dirichlet_scale:g}'
+    return f'{name}_c{config.model.schedule_c:g}'
 
 
 def update_config(config, dataset, work_type, args):
