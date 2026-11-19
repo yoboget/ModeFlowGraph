@@ -22,9 +22,9 @@ extra_features:
   spectral_embeddings: False
   k: 0
   graph_size: True
-  molecular_feat: False
+  molecular_feat: True
   cycles: False
-  rrwp: False
+  rrwp: True
   rrwp_k: 5
 
 sampling:
