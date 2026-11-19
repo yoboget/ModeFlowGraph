@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./checkpoints/zinc/dirichlet6-laqxi1ki/files/', help="Path to the model directory"
+        default='./checkpoints/zinc/marginal-7n06t9d3/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
