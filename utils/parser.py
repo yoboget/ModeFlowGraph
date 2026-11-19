@@ -86,7 +86,7 @@ def parse_args():
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )
@@ -98,7 +98,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule_c", type=float,
-        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=0.5, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(
