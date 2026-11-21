@@ -23,7 +23,7 @@ LAMBD="0"      # -1: lambda = infinity (average weighted by the prediction)
 N_SAMPLES="10000"              # graphs per configuration
 OUTPUT="./sweeps/tuned_${DATASET}_scale${DIRICHLET_SCALE}.json"
 
-srun apptainer exec --nv graph.sif python3 ./sample_tuned_sweep.py \
+srun apptainer exec --nv graph2.sif python3 ./sample_tuned_sweep.py \
     --dataset "${DATASET}" \
     --denoiser_dir "${DENOISER_DIR}" \
     --dirichlet_scale "${DIRICHLET_SCALE}" \
