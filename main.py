@@ -125,8 +125,11 @@ def sample_training_graphs(train_set, n, max_num_nodes):
 
 def run_name(config):
     """wandb run name: <prior>_<sampler>_<input>, then the Dirichlet scale (dirichlet prior) or the schedule exponent c
-    (discrete priors), e.g. dirichlet_quantile_map_sufficient_scale6, marginal_sid_state_c2."""
+    (discrete priors), e.g. dirichlet_quantile_map_sufficient_scale6,
+    dirichlet_tuned_sufficient_lambda-1_eta0.5_scale6 ('tuned': with lambda and eta), marginal_sid_state_c2."""
     name = f'{config.model.prior}_{config.sampling.id}_{config.model.input}'
+    if config.sampling.id == 'tuned':
+        name = f'{name}_lambda{config.sampling.lambd:g}_eta{config.sampling.eta:g}'
     if config.model.prior == 'dirichlet':
         return f'{name}_scale{config.model.dirichlet_scale:g}'
     return f'{name}_c{config.model.schedule_c:g}'
@@ -148,6 +151,8 @@ def update_config(config, dataset, work_type, args):
     config.sampling.hyp_selection = args.hyp_selection
     config.sampling.greedy_last_step = args.greedy_last_step
     config.sampling.temperature = args.temperature
+    config.sampling.lambd = args.lambd
+    config.sampling.eta = args.eta
     config.log.pgd = args.pgd
     return config
 

@@ -31,6 +31,11 @@ With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for 
              Dir(1 + alpha(t) e_i) onto Dir(1 + alpha(u) e_i) through the quantiles of the Beta marginal of z_i.
              Only the initial noise and the last step (a draw from the prediction, or its argmax with
              greedy_last_step) are random.
+    - 'tuned': the 'tuned' sampler of Dirichlet flow matching (see utils.noising.tuned_step). Each map T_i(z_t) is
+             partially resampled towards Dir(1 + alpha(u) e_i) by an amount eta (0: the deterministic map, 1: a fresh
+             conditional sample), and the k results are combined with weights set by lambd (< 0: the average weighted
+             by p(z_1 | G_t), 0: one class drawn from p(z_1 | G_t), > 0: Dirichlet(lambd p(z_1 | G_t)) weights).
+             eta = 0 and lambd < 0 is 'quantile_map'.
 
 See utils/noising.py for the dense graph representation and the priors.
 """
@@ -41,13 +46,14 @@ from torch.distributions.categorical import Categorical
 from utils.func import get_edge_mask
 from utils.modes import select_mode, to_class_logits
 from utils.noising import (MarginalUniformTransition, PARAMETRIZATIONS, BetaQuantileTable, quantile_map,
-                           sample_nodes, sample_edges, symmetrize_upper)
+                           tuned_step, sample_nodes, sample_edges, symmetrize_upper)
 
 
 class Sampler:
     def __init__(self, noiser, model_input, num_nodes_distribution, max_num_nodes, n_node_types,
                  batch_size, device, hyp_selection='sample', training_method='denoiser',
-                 sampling_method='denoiser', greedy_last_step=False, n_edge_types=None, temperature=1.):
+                 sampling_method='denoiser', greedy_last_step=False, n_edge_types=None, temperature=1.,
+                 lambd=-1., eta=1.):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
@@ -62,7 +68,13 @@ class Sampler:
             greedy_last_step: at the last step, take the argmax of the prediction instead of sampling it.
             n_edge_types: number of edge types including 'no edge' (needed by the 'dirichlet' prior).
             temperature: sampling temperature tau > 0, p(z_1 | G_t) -> p(z_1 | G_t)^(1 / tau) renormalized.
+            lambd, eta: 'tuned' sampler ('dirichlet' prior), see utils.noising.tuned_step. lambd: combination of the
+                per-class maps (< 0: average weighted by the prediction, 0: one class drawn from it, > 0: Dirichlet
+                weights); eta in [0, 1]: amount of resampling of each map (0: deterministic, 1: full).
         """
+        assert 0. <= eta <= 1., f'eta must be in [0, 1], got {eta}'
+        self.lambd = lambd
+        self.eta = eta
         assert training_method in PARAMETRIZATIONS and sampling_method in PARAMETRIZATIONS
         self.training_method = training_method
         self.sampling_method = sampling_method
@@ -85,7 +97,7 @@ class Sampler:
         if self.dirichlet:
             assert n_edge_types is not None, "The 'dirichlet' prior needs n_edge_types"
             self.node_transitions = self.edge_transitions = None
-            self.node_table = self.edge_table = None    # built on the first 'quantile_map' call
+            self.node_table = self.edge_table = None    # built on the first 'quantile_map' / 'tuned' call
         else:
             self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
             self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
@@ -101,10 +113,10 @@ class Sampler:
             node_mask: (n_samples, n), adj_mask: (n_samples, n, n).
         """
         samplers = {'sid': self.sample_sid, 'dif': self.sample_dif, 'dfm': self.sample_dfm,
-                    'quantile_map': self.sample_quantile_map}
+                    'quantile_map': self.sample_quantile_map, 'tuned': self.sample_tuned}
         if method not in samplers:
             raise NotImplementedError(f'Sampling method {method} not implemented. Available: {list(samplers)}')
-        available = ('sid', 'quantile_map') if self.dirichlet else ('sid', 'dif', 'dfm')
+        available = ('sid', 'quantile_map', 'tuned') if self.dirichlet else ('sid', 'dif', 'dfm')
         if method not in available:
             raise NotImplementedError(f"Sampling method {method} is not available with the '{self.noiser.prior}' "
                                       f"prior. Available: {available}")
@@ -191,6 +203,20 @@ class Sampler:
         the edges (upper triangle, mirrored). The last step returns a draw from the prediction p(z_1 | G_t), or its
         argmax with greedy_last_step.
         """
+        return self.sample_dirichlet_path(node_mask, quantile_map)
+
+    def sample_tuned(self, node_mask):
+        """
+        'tuned' sampling of the Dirichlet path (Dirichlet flow matching, see the module docstring and
+        utils.noising.tuned_step), with the parameters lambd and eta. The last step returns a draw from the prediction
+        p(z_1 | G_t), or its argmax with greedy_last_step.
+        """
+        return self.sample_dirichlet_path(
+            node_mask, lambda z_t, p_z1, table, k: tuned_step(z_t, p_z1, table, k, self.lambd, self.eta))
+
+    def sample_dirichlet_path(self, node_mask, step):
+        """Steps z_u = step(z_t, p(z_1 | G_t), table, k) along the Dirichlet path, elementwise for the nodes and the
+        edges (upper triangle, mirrored), then a draw (or the argmax) from the last prediction."""
         if self.node_table is None:
             if self.has_node_types:
                 self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
@@ -204,9 +230,9 @@ class Sampler:
                 x_1 = self.draw_nodes(p_x1, node_mask, last=True) if self.has_node_types else x_t
                 return x_1, self.draw_edges(p_a1, adj_mask, last=True)
 
-            a_t = symmetrize_upper(quantile_map(a_t, p_a1, self.edge_table, k)) * adj_mask.unsqueeze(-1)
+            a_t = symmetrize_upper(step(a_t, p_a1, self.edge_table, k)) * adj_mask.unsqueeze(-1)
             if self.has_node_types:
-                x_t = quantile_map(x_t, p_x1, self.node_table, k) * node_mask.unsqueeze(-1)
+                x_t = step(x_t, p_x1, self.node_table, k) * node_mask.unsqueeze(-1)
 
     def sample_dfm(self, node_mask):
         """

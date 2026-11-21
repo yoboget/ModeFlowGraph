@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset", type=str,
-        default='zinc',
+        default='qm9',
         help="Name of the dataset. Available: qm9, qm9H, zinc, planar, sbm, enzymes"
     )
 
@@ -18,12 +18,12 @@ def parse_args():
 
     parser.add_argument(
         "--wandb", type=str,
-        default='on', help="If W&B is online, offline or disabled"
+        default='no', help="If W&B is online, offline or disabled"
     )
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./checkpoints/zinc/marginal-7n06t9d3/files/', help="Path to the model directory"
+        default='./checkpoints/qm9/dirichlet_sufficient_small-nu0v78a0/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -72,6 +72,20 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--lambd", type=float,
+        default=-1., help="'tuned' sampling ('dirichlet' prior): how the per-class quantile maps are combined. < 0 "
+                          "(-1, lambda = infinity): average weighted by the prediction p(z_1 | G_t) (deterministic), "
+                          "0: one class drawn from p(z_1 | G_t), > 0: Dirichlet(lambda p(z_1 | G_t)) mixing weights"
+    )
+
+    parser.add_argument(
+        "--eta", type=float,
+        default=1., help="'tuned' sampling ('dirichlet' prior), in [0, 1]: how much each conditional map is resampled "
+                         "from its target Dirichlet. 0: the deterministic quantile map, 1: a fresh conditional sample, "
+                         "in between: partial resampling (rho = 1 - eta). eta = 0 with lambd < 0 is 'quantile_map'"
+    )
+
+    parser.add_argument(
         "--pgd", action=argparse.BooleanOptionalAction,
         default=True, help="Also compute the PolyGraph Discrepancy (eval/pgd.py, Krimmel et al. 2025): a TabPFN "
                            "classifier's lower bound on the JS distance between generated and reference graphs. Only when sampling "
@@ -80,13 +94,13 @@ def parse_args():
 
     parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=6, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
+        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
                          "z_t ~ Dir(1 + alpha(t) z_1)"
     )
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )

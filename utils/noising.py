@@ -22,7 +22,9 @@ from scipy.special import betaincinv
 import torch
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
+from torch.distributions.beta import Beta
 from torch.distributions.dirichlet import Dirichlet
+from torch.distributions.gamma import Gamma
 
 from utils.func import get_edge_mask
 
@@ -263,6 +265,7 @@ class BetaQuantileTable:
         assert np.isfinite(x).all() and (np.diff(x, axis=1) >= 0).all()
         self.u = torch.as_tensor(u, device=device)
         self.x = torch.as_tensor(x, device=device)
+        self.a = torch.as_tensor(a, device=device)                     # (T,) concentrations a_s
 
     @staticmethod
     def _interp(q, xs, ys):
@@ -280,14 +283,34 @@ class BetaQuantileTable:
         return self._interp(u, self.u, self.x[s])
 
 
-def quantile_map(z_t, p_z1, table, s, eps=1e-12):
+def quantile_maps(z_t, table, s, eps=1e-12):
     """
-    Deterministic step of the Dirichlet path from t_s to t_{s+1} (the 'cdf_trick' of Dirichlet flow matching).
+    The per-class maps of the Dirichlet path from t_s to t_{s+1} (the 'cdf_trick' of Dirichlet flow matching).
     Conditional on the clean class i, z_t ~ Dir(1 + alpha(t_s) e_i): z_i ~ Beta(1 + alpha(t_s), k - 1) and the other
     coordinates, renormalized, are uniform on the remaining simplex and independent of z_i. So
         T_i(z)_i = F_{s+1}^{-1}(F_s(z_i)),    T_i(z)_j = z_j (1 - T_i(z)_i) / (1 - z_i),  j != i,
-    maps Dir(1 + alpha(t_s) e_i) exactly onto Dir(1 + alpha(t_{s+1}) e_i). The step averages these maps over the
-    prediction: z_u = sum_i p(z_1 = i | G_t) T_i(z_t).
+    maps Dir(1 + alpha(t_s) e_i) exactly onto Dir(1 + alpha(t_{s+1}) e_i).
+
+    Args:
+        z_t: (..., k) points on the simplex. table: BetaQuantileTable for k classes. s: index of t in the sampling
+            grid (s + 1 < T).
+    Returns:
+        (..., k_i, k_j) float64, row i is T_i(z_t).
+    """
+    z = z_t.double()
+    z_i = z.clamp(eps, 1 - eps)
+    z_i_next = table.ppf(table.cdf(z_i, s), s + 1)                  # (..., k), the coordinate i of T_i
+    maps = z.unsqueeze(-2) * ((1 - z_i_next) / (1 - z_i)).unsqueeze(-1)   # (..., k_i, k_j)
+    maps = maps.clone()
+    diag = torch.arange(z.size(-1), device=z.device)
+    maps[..., diag, diag] = z_i_next
+    return maps
+
+
+def quantile_map(z_t, p_z1, table, s, eps=1e-12):
+    """
+    Deterministic step of the Dirichlet path from t_s to t_{s+1}: the per-class maps T_i (quantile_maps) averaged
+    over the prediction, z_u = sum_i p(z_1 = i | G_t) T_i(z_t).
 
     Args:
         z_t: (..., k) points on the simplex. p_z1: (..., k) prediction. table: BetaQuantileTable for k classes.
@@ -295,14 +318,65 @@ def quantile_map(z_t, p_z1, table, s, eps=1e-12):
     Returns:
         (..., k) next points on the simplex, same dtype as z_t.
     """
-    z = z_t.double()
-    z_i = z.clamp(eps, 1 - eps)
-    z_i_next = table.ppf(table.cdf(z_i, s), s + 1)                  # (..., k), the coordinate i of T_i
-    maps = z.unsqueeze(-2) * ((1 - z_i_next) / (1 - z_i)).unsqueeze(-1)   # (..., k_i, k_j): row i is T_i(z)
-    maps = maps.clone()
-    diag = torch.arange(z.size(-1), device=z.device)
-    maps[..., diag, diag] = z_i_next
+    maps = quantile_maps(z_t, table, s, eps)
     z_u = (p_z1.double().unsqueeze(-1) * maps).sum(-2)
+    z_u = z_u / z_u.sum(-1, keepdim=True).clamp_min(1e-300)
+    return z_u.to(z_t.dtype)
+
+
+def partial_resampling(z, conc, rho):
+    """
+    Markov kernel M_rho on the simplex that leaves Dir(conc) invariant (Dirichlet flow matching's partial resampling):
+        G = S z with S ~ Gamma(sum conc), so that G_j ~ Gamma(conc_j) independently (if z ~ Dir(conc)),
+        G'_j = B_j G_j + E_j with B_j ~ Beta(rho conc_j, (1 - rho) conc_j) and E_j ~ Gamma((1 - rho) conc_j),
+        z' = G' / sum G'.
+    rho = 1 keeps z, rho = 0 draws a fresh z' ~ Dir(conc), in between keeps part of z.
+    z, conc: (..., k), conc broadcastable. rho: float in [0, 1].
+    """
+    if rho >= 1:
+        return z
+    conc = conc.expand_as(z)
+    if rho <= 0:
+        return Dirichlet(conc).sample()
+    S = Gamma(conc.sum(-1, keepdim=True), torch.ones_like(z[..., :1])).sample()
+    B = Beta(rho * conc, (1 - rho) * conc).sample()
+    E = Gamma((1 - rho) * conc, torch.ones_like(conc)).sample()
+    G = B * S * z + E
+    return G / G.sum(-1, keepdim=True).clamp_min(1e-300)
+
+
+def tuned_step(z_t, p_z1, table, s, lambd, eta, eps=1e-12):
+    """
+    Tuned step of the Dirichlet path from t_s to t_{s+1} ('tuned' of Dirichlet flow matching):
+      1. the per-class quantile maps T_i(z_t) (quantile_maps), each exactly distributed as Dir(1 + alpha(t_{s+1}) e_i)
+         when z_t ~ Dir(1 + alpha(t_s) e_i);
+      2. partial resampling of each T_i(z_t) by M_rho targeting Dir(1 + alpha(t_{s+1}) e_i), rho = 1 - eta
+         (partial_resampling): eta = 0 keeps the deterministic map, eta = 1 draws a fresh conditional sample;
+      3. combination of the k results with weights w:
+            lambd < 0 (lambda = infinity): w = p(z_1 | G_t), the average of the maps (with eta = 0: quantile_map),
+            lambd = 0: w = e_i with i ~ p(z_1 | G_t), one class,
+            lambd > 0: w ~ Dir(lambd p(z_1 | G_t)), from one class (lambd -> 0) to the average (lambd -> infinity).
+    Args:
+        z_t: (..., k) points on the simplex. p_z1: (..., k) prediction. table: BetaQuantileTable for k classes.
+        s: index of t in the sampling grid (s + 1 < T). lambd: float. eta: float in [0, 1].
+    Returns:
+        (..., k) next points on the simplex, same dtype as z_t.
+    """
+    maps = quantile_maps(z_t, table, s, eps)                                 # (..., k_i, k_j)
+    k = maps.size(-1)
+    conc = 1 + (table.a[s + 1] - 1) * torch.eye(k, dtype=maps.dtype, device=maps.device)   # row i: 1 + alpha e_i
+    maps = partial_resampling(maps, conc, 1. - eta)
+    p = p_z1.double()
+    if lambd < 0:
+        w = p
+    elif lambd == 0:
+        w = F.one_hot(Categorical(probs=p.clamp_min(0)).sample(), k).to(p.dtype)
+    else:
+        g = Gamma((lambd * p).clamp_min(1e-24), torch.ones_like(p)).sample()
+        total = g.sum(-1, keepdim=True)
+        # all the Gamma draws can underflow to 0 for a very peaked p: fall back to the average
+        w = torch.where(total > 0, g / total.clamp_min(1e-300), p)
+    z_u = (w.unsqueeze(-1) * maps).sum(-2)
     z_u = z_u / z_u.sum(-1, keepdim=True).clamp_min(1e-300)
     return z_u.to(z_t.dtype)
 
