@@ -18,8 +18,8 @@ DENOISER_DIR="./checkpoints/qm9/dirichlet_sufficient_small-nu0v78a0/files/"
 DIRICHLET_SCALE="3"            # must match the checkpoint
 INPUT="sufficient"             # must match the checkpoint
 NFE="128"                # numbers of sampling steps T
-ETA="0"
-LAMBD="0 0.1 1 10 100 -1"      # -1: lambda = infinity (average weighted by the prediction)
+ETA="0 0.05 0.25 0.5 0.75 1"
+LAMBD="0"      # -1: lambda = infinity (average weighted by the prediction)
 N_SAMPLES="10000"              # graphs per configuration
 OUTPUT="./sweeps/tuned_${DATASET}_scale${DIRICHLET_SCALE}.json"
 
