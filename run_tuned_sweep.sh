@@ -17,7 +17,7 @@ DATASET="qm9"
 DENOISER_DIR="./checkpoints/qm9/dirichlet_sufficient_small-nu0v78a0/files/"
 DIRICHLET_SCALE="3"            # must match the checkpoint
 INPUT="sufficient"             # must match the checkpoint
-NFE="128"                # numbers of sampling steps T
+NFE="128"                # numbers of sampling steps T, e.g. "32 64 128" (empty: model.T of the config)
 ETA="0 0.05 0.25 0.5 0.75 1"
 LAMBD="0"      # -1: lambda = infinity (average weighted by the prediction)
 N_SAMPLES="10000"              # graphs per configuration
@@ -28,7 +28,7 @@ srun apptainer exec --nv graph.sif python3 ./sample_tuned_sweep.py \
     --denoiser_dir "${DENOISER_DIR}" \
     --dirichlet_scale "${DIRICHLET_SCALE}" \
     --input "${INPUT}" \
-    --nfe ${NFE} \
+    ${NFE:+--nfe ${NFE}} \
     --eta ${ETA} \
     --lambd ${LAMBD} \
     --n_samples "${N_SAMPLES}" \

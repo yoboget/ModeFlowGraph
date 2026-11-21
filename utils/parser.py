@@ -72,6 +72,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--nfe", type=int, nargs='+',
+        default=128, help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
+                           "and sample_tuned_sweep.py). Default: model.T of the config"
+    )
+
+    parser.add_argument(
         "--lambd", type=float,
         default=-1., help="'tuned' sampling ('dirichlet' prior): how the per-class quantile maps are combined. < 0 "
                           "(-1, lambda = infinity): average weighted by the prediction p(z_1 | G_t) (deterministic), "

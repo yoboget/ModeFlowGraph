@@ -47,7 +47,8 @@ def main() -> None:
                    name=run_name(config))
         times = []
 
-        for r in [32, 64, 128, 256, 512]:  # sweep over the number of sampling steps T
+        # sweep over the numbers of sampling steps T (--nfe, default: model.T of the config)
+        for r in args.nfe or [config.model.T]:
             config.model.T = r
             dataloader = get_dataset(config)
             trainer = Trainer(dataloader, config)
