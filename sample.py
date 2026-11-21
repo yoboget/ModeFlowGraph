@@ -36,6 +36,9 @@ With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for 
              conditional sample), and the k results are combined with weights set by lambd (< 0: the average weighted
              by p(z_1 | G_t), 0: one class drawn from p(z_1 | G_t), > 0: Dirichlet(lambd p(z_1 | G_t)) weights).
              eta = 0 and lambd < 0 is 'quantile_map'.
+    - 'vector_field': the 'original' sampler of Dirichlet flow matching (see utils.noising.vector_field_step), Euler
+             steps of the marginal vector field sum_i p(z_1 = i | G_t) C(z_i, a) (e_i - z) in the concentration
+             a = 1 + alpha(t), with the exact C factor, projected onto the simplex when a step leaves it.
 
 See utils/noising.py for the dense graph representation and the priors.
 """
@@ -46,7 +49,7 @@ from torch.distributions.categorical import Categorical
 from utils.func import get_edge_mask
 from utils.modes import select_mode, to_class_logits
 from utils.noising import (MarginalUniformTransition, PARAMETRIZATIONS, BetaQuantileTable, quantile_map,
-                           tuned_step, sample_nodes, sample_edges, symmetrize_upper)
+                           tuned_step, VectorFieldTable, vector_field_step, sample_nodes, sample_edges, symmetrize_upper)
 
 
 class Sampler:
@@ -98,6 +101,7 @@ class Sampler:
             assert n_edge_types is not None, "The 'dirichlet' prior needs n_edge_types"
             self.node_transitions = self.edge_transitions = None
             self.node_table = self.edge_table = None    # built on the first 'quantile_map' / 'tuned' call
+            self.node_field = self.edge_field = None    # built on the first 'vector_field' call
         else:
             self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
             self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
@@ -113,10 +117,11 @@ class Sampler:
             node_mask: (n_samples, n), adj_mask: (n_samples, n, n).
         """
         samplers = {'sid': self.sample_sid, 'dif': self.sample_dif, 'dfm': self.sample_dfm,
-                    'quantile_map': self.sample_quantile_map, 'tuned': self.sample_tuned}
+                    'quantile_map': self.sample_quantile_map, 'tuned': self.sample_tuned,
+                    'vector_field': self.sample_vector_field}
         if method not in samplers:
             raise NotImplementedError(f'Sampling method {method} not implemented. Available: {list(samplers)}')
-        available = ('sid', 'quantile_map', 'tuned') if self.dirichlet else ('sid', 'dif', 'dfm')
+        available = ('sid', 'quantile_map', 'tuned', 'vector_field') if self.dirichlet else ('sid', 'dif', 'dfm')
         if method not in available:
             raise NotImplementedError(f"Sampling method {method} is not available with the '{self.noiser.prior}' "
                                       f"prior. Available: {available}")
@@ -214,13 +219,28 @@ class Sampler:
         return self.sample_dirichlet_path(
             node_mask, lambda z_t, p_z1, table, k: tuned_step(z_t, p_z1, table, k, self.lambd, self.eta))
 
-    def sample_dirichlet_path(self, node_mask, step):
-        """Steps z_u = step(z_t, p(z_1 | G_t), table, k) along the Dirichlet path, elementwise for the nodes and the
-        edges (upper triangle, mirrored), then a draw (or the argmax) from the last prediction."""
-        if self.node_table is None:
+    def sample_vector_field(self, node_mask):
+        """
+        Euler integration of the vector field of the Dirichlet path ('original' method of Dirichlet flow matching,
+        see the module docstring and utils.noising.vector_field_step). The last step returns a draw from the
+        prediction p(z_1 | G_t), or its argmax with greedy_last_step.
+        """
+        if self.edge_field is None:
             if self.has_node_types:
-                self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
-            self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
+                self.node_field = VectorFieldTable(self.noiser, self.n_node_types, device=self.device)
+            self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types, device=self.device)
+        return self.sample_dirichlet_path(node_mask, vector_field_step, self.node_field, self.edge_field)
+
+    def sample_dirichlet_path(self, node_mask, step, node_table=None, edge_table=None):
+        """Steps z_u = step(z_t, p(z_1 | G_t), table, k) along the Dirichlet path, elementwise for the nodes and the
+        edges (upper triangle, mirrored), then a draw (or the argmax) from the last prediction. The tables default to
+        the quantile tables (BetaQuantileTable)."""
+        if edge_table is None:   # quantile maps
+            if self.edge_table is None:
+                if self.has_node_types:
+                    self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
+                self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
+            node_table, edge_table = self.node_table, self.edge_table
         adj_mask = get_edge_mask(node_mask)
         x_t, a_t = self.sample_prior(node_mask)
 
@@ -230,9 +250,9 @@ class Sampler:
                 x_1 = self.draw_nodes(p_x1, node_mask, last=True) if self.has_node_types else x_t
                 return x_1, self.draw_edges(p_a1, adj_mask, last=True)
 
-            a_t = symmetrize_upper(step(a_t, p_a1, self.edge_table, k)) * adj_mask.unsqueeze(-1)
+            a_t = symmetrize_upper(step(a_t, p_a1, edge_table, k)) * adj_mask.unsqueeze(-1)
             if self.has_node_types:
-                x_t = step(x_t, p_x1, self.node_table, k) * node_mask.unsqueeze(-1)
+                x_t = step(x_t, p_x1, node_table, k) * node_mask.unsqueeze(-1)
 
     def sample_dfm(self, node_mask):
         """
