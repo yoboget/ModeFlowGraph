@@ -19,8 +19,8 @@ DIRICHLET_SCALE="6"            # must match the checkpoint
 SCHEDULE="cosine"              # cosine, linear or sparse, must match the checkpoint
 INPUT="state"             # must match the checkpoint
 NFE="128"                # numbers of sampling steps T, e.g. "32 64 128" (empty: model.T of the config)
-ETA="0.05 0.25 0.5 0.75 1"           # 0.05 0.25 0.5 0.75 1
-LAMBD="0"      # -1: lambda = infinity (average weighted by the prediction)
+ETA="0"           # 0.05 0.25 0.5 0.75 1
+LAMBD="0 0.1 1 10 100 -1"      # -1: lambda = infinity (average weighted by the prediction)
 N_SAMPLES="10000"              # graphs per configuration
 OUTPUT="./sweeps/tuned_${DATASET}_${SCHEDULE}_scale${DIRICHLET_SCALE}.json"
 
