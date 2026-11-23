@@ -7,19 +7,23 @@ Graphs are dense one-hot tensors:
     node_mask: (bs, n) and adj_mask: (bs, n, n) (no self-loops) mark the existing nodes / node pairs.
 
 Time runs from t = 0 (pure noise, the prior) to t = 1 (data). At time t, each node and edge independently keeps
-its clean value with probability alpha_bar(t) = cos(pi (1 - t) / 2)^c and is otherwise replaced by a draw from the prior:
+its clean value with probability alpha_bar(t) and is otherwise replaced by a draw from the prior, with the schedule
+'cosine' alpha_bar(t) = cos(pi (1 - t) / 2)^c or 'linear' alpha_bar(t) = t:
     - 'marginal': the node / edge type distribution of the training set,
     - 'masking':  a mask token, added as an extra last class.
 Graphs without node types only have their edges noised.
 
 NoiserDirichlet is a continuous alternative (prior 'dirichlet', as in dirisid's 'dirch'): each node / edge is a point
-on the simplex, z_t ~ Dir(1 + alpha(t) z_1) with alpha(t) = -scale log(1 - t), so that z_t is uniform on the simplex at
-t = 0 and concentrates on the vertex z_1 as t -> 1.
+on the simplex, z_t ~ Dir(1 + alpha(t) z_1) with alpha(t) = -scale log(1 - t) (schedule 'cosine', the default) or
+alpha(t) = scale t ('linear', as in Dirichlet flow matching with alpha_max = 1 + scale), so that z_t is uniform on the
+simplex at t = 0 and concentrates on the vertex z_1 as t -> 1. The schedule 'sparse' (dirichlet only) is another path,
+z_t ~ Dir(alpha(t) z_1 + (1 - alpha(t)) 1) with alpha(t) = 1 - (1 - t)^scale: the concentration of the other classes
+goes from 1 to 0, and z_t reaches the vertex z_1 exactly at t = 1.
 """
 import os.path
 import numpy as np
-import scipy.special as sp
-from scipy.special import betaincinv
+from scipy.special import betainc, betaincinv
+from scipy.special import beta as beta_function
 import torch
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
@@ -34,16 +38,18 @@ PRIORS = ('marginal', 'masking', 'dirichlet')
 # What the denoiser predicts (training_method) / what the 'dif' sampler uses (sampling_method), see
 # NoiserDense.convert_parametrization
 PARAMETRIZATIONS = ('denoiser', 'cavity')
+SCHEDULES = ('cosine', 'linear', 'sparse')     # 'sparse': prior 'dirichlet' only
 
 
 class NoiserDense:
-    def __init__(self, timesteps, prior, node_marginals, edge_marginals, schedule_c=2.):
+    def __init__(self, timesteps, prior, node_marginals, edge_marginals, schedule_c=2., schedule='cosine'):
         """
         Args:
             timesteps: number of sampling steps T, on the uniform grid t = 0, 1 / T, ..., 1.
             prior: 'marginal' or 'masking'.
             node_marginals, edge_marginals: node / edge type distributions of the training set.
-            schedule_c: exponent c of the schedule alpha_bar(t) = cos(pi t / 2)^c.
+            schedule_c: exponent c of the 'cosine' schedule alpha_bar(t) = cos(pi (1 - t) / 2)^c.
+            schedule: 'cosine' or 'linear' (alpha_bar(t) = t).
         """
         if prior not in PRIORS or prior == 'dirichlet':
             raise NotImplementedError(f'Unknown prior {prior} for NoiserDense. Available: {PRIORS[:2]} '
@@ -51,6 +57,10 @@ class NoiserDense:
         self.T = timesteps
         self.prior = prior
         self.schedule_c = schedule_c
+        if schedule not in ('cosine', 'linear'):
+            raise NotImplementedError(f"Unknown schedule {schedule} for the prior {prior}. Available: cosine, linear "
+                                      f"('sparse' is for the 'dirichlet' prior)")
+        self.schedule = schedule
 
         if prior == 'marginal':
             self.node_prior, self.edge_prior = node_marginals, edge_marginals
@@ -60,6 +70,9 @@ class NoiserDense:
 
     def get_alpha_bar(self, t):
         """Probability that an element is clean at time t (t = 0: prior, t = 1: data)."""
+        t = torch.as_tensor(t, dtype=torch.float)
+        if self.schedule == 'linear':
+            return t.clamp(0, 1)
         # clamp: cos(pi / 2) is slightly negative in float, which gives NaN for non-integer c
         return torch.cos(0.5 * np.pi * (1 - torch.as_tensor(t, dtype=torch.float))).clamp(min=0) ** self.schedule_c
 
@@ -158,32 +171,61 @@ class NoiserDense:
 class NoiserDirichlet:
     """
     Dirichlet noising (dirisid's 'dirch' prior): each node / edge z_1 (one-hot over k classes) becomes
-        z_t ~ Dir(1 + alpha(t) z_1),    alpha(t) = -scale log(1 - t),
+        z_t ~ Dir(1 + alpha(t) z_1),    alpha(t) = -scale log(1 - t)  (schedule 'cosine')  or  scale t  ('linear'),
     i.e. concentration 1 + alpha(t) on the data class and 1 on the others. At t = 0, Dir(1, ..., 1) is uniform on the
-    simplex; as t -> 1, alpha(t) -> infinity and z_t -> z_1. Edges are sampled on the upper triangle and mirrored.
+    simplex; as t -> 1, alpha(t) -> infinity and z_t -> z_1 ('cosine'), or alpha(1) = scale ('linear': the path is cut
+    at the concentration 1 + scale, alpha_max of Dirichlet flow matching, and the samplers' last step draws from the
+    prediction). Edges are sampled on the upper triangle and mirrored.
+
+    Schedule 'sparse': z_t ~ Dir(alpha(t) z_1 + (1 - alpha(t)) 1), alpha(t) = 1 - (1 - t)^scale, i.e. concentration 1 on
+    the data class and b(t) = (1 - t)^scale on the others. Uniform at t = 0, exactly the vertex z_1 at t = 1. It has the
+    mean of the 'cosine' path with A = alpha / (1 - alpha), with all the concentrations divided by 1 + A: the points
+    are sparser (close to the faces of the simplex). scale 1 is linear in alpha; scale ~2 spreads the information
+    about z_1 evenly over t, larger values bring it earlier.
+
+    In general z_t | z_1 = i ~ Dir(b(t) + (a(t) - b(t)) e_i) (get_dirichlet_params): a = 1 + alpha, b = 1 for
+    'cosine' / 'linear', a = 1, b = 1 - alpha for 'sparse'. log q(z_t | z_1 = i) = (a - b) log z_i + const, with
+    a - b = alpha(t) (get_concentration) in both cases.
 
     Same interface as NoiserDense. The noise level passed around (get_alpha_bar) is t itself, and the denoiser gets
     (t, 1 - t) as two extra node features (model input 'state'). Both parametrizations ('denoiser', 'cavity') are
     supported; the samplers are 'sid' and 'quantile_map'.
     """
 
-    def __init__(self, timesteps, scale=3.):
+    def __init__(self, timesteps, scale=3., schedule='cosine'):
         """
         Args:
             timesteps: number of sampling steps T, on the uniform grid t = 0, 1 / T, ..., 1.
-            scale: alpha(t) = -scale log(1 - t).
+            scale: alpha(t) = -scale log(1 - t) ('cosine'), scale t ('linear') or 1 - (1 - t)^scale ('sparse').
+            schedule: 'cosine', 'linear' or 'sparse'.
         """
+        if schedule not in SCHEDULES:
+            raise NotImplementedError(f'Unknown schedule {schedule}. Available: {SCHEDULES}')
         self.T = timesteps
         self.prior = 'dirichlet'
         self.scale = scale
+        self.schedule = schedule
 
     def get_alpha_bar(self, t):
         """Noise level of the Dirichlet path: t itself (t = 0: uniform on the simplex, t = 1: data)."""
         return torch.as_tensor(t, dtype=torch.float)
 
     def get_concentration(self, t):
-        """alpha(t) = -scale log(1 - t), the extra concentration on the data class (t < 1)."""
+        """alpha(t) = a(t) - b(t), the coefficient of log q(z_t | z_1 = i) = alpha(t) log z_i + const:
+        -scale log(1 - t) ('cosine', t < 1), scale t ('linear') or 1 - (1 - t)^scale ('sparse')."""
+        if self.schedule == 'linear':
+            return self.scale * t
+        if self.schedule == 'sparse':
+            return 1 - (1 - t).clamp_min(0) ** self.scale
         return -self.scale * torch.log1p(-t)
+
+    def get_dirichlet_params(self, t):
+        """(a(t), b(t)): z_t | z_1 = i ~ Dir(b(t) + (a(t) - b(t)) e_i), concentration a on the data class and b on the
+        others. t: tensor."""
+        if self.schedule == 'sparse':
+            b = (1 - t).clamp_min(0) ** self.scale
+            return torch.ones_like(b), b
+        return 1 + self.get_concentration(t), torch.ones_like(t)
 
     def to_noisy_classes(self, p):
         return p
@@ -211,15 +253,24 @@ class NoiserDirichlet:
         """
         bs, n = node_mask.shape
         t = torch.as_tensor(t, dtype=torch.float, device=a.device).expand(bs)
-        alpha = self.get_concentration(t)
+        conc_true, conc_other = self.get_dirichlet_params(t)
         adj_mask = get_edge_mask(node_mask)
 
         if x.size(-1) > 1:
-            x = Dirichlet(1 + alpha.view(bs, 1, 1) * x).sample() * node_mask.unsqueeze(-1)
+            x = Dirichlet(self._concentrations(x, conc_true, conc_other)).sample() * node_mask.unsqueeze(-1)
 
-        a = Dirichlet(1 + alpha.view(bs, 1, 1, 1) * a).sample()
+        a = Dirichlet(self._concentrations(a, conc_true, conc_other)).sample()
         a = symmetrize_upper(a) * adj_mask.unsqueeze(-1)
         return x, a, (None, None)
+
+    @staticmethod
+    def _concentrations(z1, conc_true, conc_other):
+        """b + (a - b) z_1 for one-hot z_1 (..., k), a, b: (bs,). Padding rows (z_1 = 0) get 1 (uniform), and b is
+        kept > 0 ('sparse' at t -> 1), so that the Dirichlet is always defined."""
+        shape = (-1,) + (1,) * (z1.ndim - 1)
+        conc_true, conc_other = conc_true.view(shape), conc_other.clamp_min(1e-20).view(shape)
+        conc = conc_other + (conc_true - conc_other) * z1
+        return torch.where(z1.sum(-1, keepdim=True) > 0, conc, torch.ones_like(conc))
 
     def sample_prior(self, node_mask, n_node_types, n_edge_types):
         """G_0: every node and edge uniform on the simplex (nodes without types are left at 1)."""
@@ -235,8 +286,8 @@ class NoiserDirichlet:
 
     def log_likelihood(self, z_t, t, kind=None):
         """
-        log q(z_t | z_1 = b) for every class b, up to a constant in b. The normalizer of Dir(1 + alpha e_b) does not
-        depend on b, so this is alpha(t) log z_{t,b}. z_t: (bs, ..., k) on the simplex, t: scalar or (bs,).
+        log q(z_t | z_1 = b) for every class b, up to a constant in b. The normalizer of Dir(b(t) + alpha(t) e_b) does
+        not depend on b, so this is alpha(t) log z_{t,b} (get_concentration). z_t: (bs, ..., k) on the simplex, t: scalar or (bs,).
         Padding elements (z_t = 0) get the same value for every class.
         """
         alpha = self.get_concentration(expand_noise_level(t, z_t))
@@ -247,142 +298,192 @@ class NoiserDirichlet:
         return convert_parametrization(self, logits, z_t, t, kind, source, target)
 
 
+LOGIT_MAX = 700.     # |logit| bound of the quantile tables (float64 exponent range)
+
+
+def beta_logit_quantiles(p, q, v):
+    """
+    logit F^{-1}(u) = log x - log(1 - x) of Beta(p, q) at the levels u = sigmoid(v) (v increasing), accurate at both
+    ends: log x from betaincinv(p, q, u) when x < 1/2, log(1 - x) from betaincinv(q, p, 1 - u) when 1 - x < 1/2
+    (1 - X ~ Beta(q, p)), with u and 1 - u = sigmoid(-v) each computed to full precision. Where betaincinv fails
+    (NaN for very small levels) or x / 1 - x underflow, the tails are extrapolated linearly in v from the valid part:
+    logit(x) ~ (v + c) / p as u -> 0 and (v + c') / q as u -> 1. Clipped to [-LOGIT_MAX, LOGIT_MAX] and made
+    non-decreasing (numerical noise of betaincinv for small p, q).
+    """
+    with np.errstate(divide='ignore', under='ignore', invalid='ignore', over='ignore'):
+        u, u_c = 1 / (1 + np.exp(-v)), 1 / (1 + np.exp(v))
+        x = betaincinv(p, q, u)
+        w = betaincinv(q, p, u_c)
+        log_x = np.where(x < 0.5, np.log(x), np.log1p(-w))
+        log_w = np.where(w < 0.5, np.log(w), np.log1p(-x))
+        logit = log_x - log_w
+    valid = np.isfinite(logit)
+    assert valid.sum() >= 4, (p, q)
+    idx = np.flatnonzero(valid)
+    lo, hi = idx[:2], idx[-2:]
+    left, right = np.arange(len(v)) < idx[0], np.arange(len(v)) > idx[-1]
+    slope_lo = (logit[lo[1]] - logit[lo[0]]) / (v[lo[1]] - v[lo[0]])
+    slope_hi = (logit[hi[1]] - logit[hi[0]]) / (v[hi[1]] - v[hi[0]])
+    logit = np.where(left, logit[lo[0]] + (v - v[lo[0]]) * slope_lo, logit)
+    logit = np.where(right, logit[hi[1]] + (v - v[hi[1]]) * slope_hi, logit)
+    # isolated failures inside the valid range: interpolate
+    inside = ~np.isfinite(logit)
+    if inside.any():
+        logit[inside] = np.interp(v[inside], v[~inside], logit[~inside])
+    return np.maximum.accumulate(np.clip(logit, -LOGIT_MAX, LOGIT_MAX))
+
+
 class BetaQuantileTable:
     """
-    Tables of the CDF / inverse CDF of Beta(a_s, k - 1) for the concentrations a_s = 1 + alpha(t_s) of the Dirichlet
-    path on the sampling grid t_s = s / T, s = 0, ..., T - 1 (alpha(1) is infinite). Under Dir(1 + alpha e_i), the
-    coordinate z_i is Beta(1 + alpha, k - 1): this is what the quantile map transports.
+    Tables of the CDF / inverse CDF of the Beta marginals of the Dirichlet path on the sampling grid t_s = s / T,
+    s = 0, ..., T - 1 (the path may be singular at t = 1). With z_t | z_1 = i ~ Dir(b_s + (a_s - b_s) e_i)
+    (NoiserDirichlet.get_dirichlet_params):
+        family 0: z_i ~ Beta(a_s, (k - 1) b_s), what the quantile map transports;
+        family r = 1, ..., k - 2 ('sparse' only, b varies): the stick-breaking fractions of the other coordinates,
+                  y = z_{-i} / (1 - z_i) ~ Dir(b_s, ..., b_s), whose fraction with r coordinates after it is
+                  Beta(b_s, r b_s).
+    For 'cosine' / 'linear', b = 1 and the other coordinates are uniform at every t: only family 0 is needed.
 
-    Both directions are piecewise-linear interpolations of the same table (x as a function of u), on a u-grid that is
-    dense at both ends (the Beta tails). Computations are in float64: z_i is close to 1 at low noise.
+    Both variables are logits, x as logit(x) = log x - log(1 - x) and the level u as logit(u), so that values within
+    1e-300 of 0 or 1 are resolved (z_i is close to 1 at low noise, and with 'sparse' the other coordinates are close
+    to 0) and the tables are close to linear in the Beta tails (logit(x) ~ logit(u) / p or / q there). Both directions
+    are piecewise-linear interpolations of the same table (logit(x) as a function of logit(u)) on a sinh-spaced grid of
+    logit(u) in [-LOGIT_MAX, LOGIT_MAX] (u from 1e-304 to 1 - 1e-304), extrapolated linearly beyond. float64.
     """
 
-    def __init__(self, noiser, k, n_grid=4096, device='cpu'):
+    def __init__(self, noiser, k, n_grid=4096, v_max=LOGIT_MAX, sinh_rate=13., device='cpu'):
         t = torch.arange(noiser.T, dtype=torch.float64) / noiser.T
-        a = (1 + noiser.get_concentration(t)).numpy()
-        u = 0.5 * (1 + np.tanh(np.linspace(-9., 9., n_grid - 2)))
-        u = np.concatenate(([0.], u, [1.]))
-        x = np.stack([betaincinv(a_s, k - 1., u) for a_s in a])         # (T, G), increasing in u
-        assert np.isfinite(x).all() and (np.diff(x, axis=1) >= 0).all()
+        a, b = (v.numpy() for v in noiser.get_dirichlet_params(t))
+        b = np.maximum(b, 1e-300)
+        # logit of the levels, sinh-spaced: ~0.02 apart around 0, ~4 apart in the (near-linear) tails
+        u = v_max * np.sinh(sinh_rate * np.linspace(-1., 1., n_grid)) / np.sinh(sinh_rate)
+        self.sticks = bool(np.any(b != 1.)) and k > 2
+        families = [(a, (k - 1) * b)] + ([(b, r * b) for r in range(1, k - 1)] if self.sticks else [])
+        logit = np.stack([np.stack([beta_logit_quantiles(p, q, u) for p, q in zip(ps, qs)])
+                          for ps, qs in families])                     # (F, T, G), non-decreasing in u
+        assert np.isfinite(logit).all()
         self.u = torch.as_tensor(u, device=device)
-        self.x = torch.as_tensor(x, device=device)
-        self.a = torch.as_tensor(a, device=device)                     # (T,) concentrations a_s
+        self.logit = torch.as_tensor(logit, device=device)
+        self.a = torch.as_tensor(a, device=device)                     # (T,) concentration of the data class
+        self.b = torch.as_tensor(b, device=device)                     # (T,) concentration of the other classes
 
     @staticmethod
     def _interp(q, xs, ys):
-        q = q.clamp(xs[0].item(), xs[-1].item())
+        """Piecewise-linear interpolation, extrapolated linearly from the end segments: in logit space the Beta tails
+        are asymptotically linear (logit(x) ~ (logit(u) + c) / p), so levels beyond 1e-20 / 1 - 1e-20 stay accurate."""
         right = torch.searchsorted(xs, q.contiguous(), right=True).clamp(1, xs.numel() - 1)
         x_l, x_r, y_l, y_r = xs[right - 1], xs[right], ys[right - 1], ys[right]
-        return y_l + (q - x_l) / (x_r - x_l).clamp_min(1e-300) * (y_r - y_l)
+        dx = x_r - x_l
+        slope = torch.where(dx > 0, (y_r - y_l) / dx.clamp_min(1e-300), torch.zeros_like(dx))
+        return y_l + (q - x_l) * slope
 
-    def cdf(self, z, s):
-        """u = F(z; a_s, k - 1)."""
-        return self._interp(z, self.x[s], self.u)
+    def cdf(self, logit, s, family=0):
+        """logit(F(x)) from logit(x), for the Beta of the family at t_s (family 0: Beta(a_s, (k - 1) b_s))."""
+        return self._interp(logit, self.logit[family, s], self.u)
 
-    def ppf(self, u, s):
-        """z = F^{-1}(u; a_s, k - 1)."""
-        return self._interp(u, self.u, self.x[s])
+    def ppf(self, u, s, family=0):
+        """logit(F^{-1}(u)) from logit(u), for the Beta of the family at t_s."""
+        return self._interp(u, self.u, self.logit[family, s])
+
+    def transport(self, logit, s, family=0):
+        """Quantile map from t_s to t_{s+1} in logit space: logit F_{s+1}^{-1}(F_s(x))."""
+        return self.ppf(self.cdf(logit, s, family), s + 1, family).clamp(-LOGIT_MAX, LOGIT_MAX)
 
 
-def dirichlet_c_factor(x, a, k, n_tail=600):
+class DirichletConditionalFlow:
     """
-    C(x, a) of the conditional vector field of the Dirichlet path (Dirichlet flow matching, 'original' method): for
-    z ~ Dir(1 + (a - 1) e_i), the coordinate z_i is Beta(a, k - 1) and the path in a is generated by
+    C factor of the conditional vector field of the Dirichlet path, as in Dirichlet flow matching
+    (utils/flow_utils.DirichletConditionalFlow, 'original' method): for z ~ Dir(1 + (a - 1) e_i), the coordinate z_i
+    is Beta(a, k - 1) and the path in a is generated by
         u_i(z, a) = C(z_i, a) (e_i - z),    C(x, a) = -dI_x(a, b)/da B(a, b) / ((1 - x)^b x^(a - 1)),  b = k - 1,
-    with I the regularized incomplete Beta function. Computed exactly in float64 from its series, without forming
-    x^(a - 1) (as error_analysis.exact_c_factor of dirichlet_flow_matching), instead of the finite difference in a of
-    the original code. x: array in [0, 1], a >= 1 scalar. C >= 0, C(0, a) = 0.
+    with I the regularized incomplete Beta function. Same numerics as the original: the Beta CDFs are tabulated on
+    the concentrations a = alpha_min, alpha_min + alpha_spacing, ... and on 1000 uniform points of [0, 1], dI/da is
+    their finite difference in a, taken at the tabulated a nearest to the query and linearly interpolated in x, and
+    B(a, b) / ((1 - x)^b x^(a - 1)) is computed directly in the dtype of x (it can underflow / overflow).
     """
-    b = k - 1
-    x = np.asarray(x, dtype=np.float64)
-    out = np.zeros(x.shape)
-    y = 1.0 - x
-    log_beta = sp.betaln(a, b)
-    lnx = np.log(np.where(x > 0, x, 1.0))
 
-    lo = (x > 0) & (x < 0.5)
-    if lo.any():
-        j = np.arange(b)
-        logw = sp.gammaln(a + j) - sp.gammaln(a) - sp.gammaln(j + 1)
-        dpsi = sp.digamma(a + j) - sp.digamma(a)
-        s = (np.exp(logw + (j - b) * np.log(y[lo, None])) * (lnx[lo, None] + dpsi)).sum(-1)
-        out[lo] = -np.exp(log_beta) * x[lo] * s
+    def __init__(self, K, alpha_min=1., alpha_max=100., alpha_spacing=0.001):
+        self.alphas = np.arange(alpha_min, alpha_max + alpha_spacing, alpha_spacing)
+        self.bs = np.linspace(0, 1, 1000)
+        self.beta_cdfs = np.array([betainc(alph, K - 1, self.bs) for alph in self.alphas])
+        self.beta_cdfs_derivative = np.diff(self.beta_cdfs, axis=0) / alpha_spacing
+        self.K = K
 
-    hi = (x >= 0.5) & (x <= 1)
-    if hi.any():
-        j = np.arange(b, b + n_tail)
-        logw = sp.gammaln(a + j) - sp.gammaln(a) - sp.gammaln(j + 1)
-        dpsi = sp.digamma(a + j) - sp.digamma(a)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            logy = np.log(y[hi, None])
-            powy = np.where(j == b, 1.0, np.exp((j - b) * logy))     # y^(j - b), with 0^0 = 1
-        s = (np.exp(logw) * powy * (lnx[hi, None] + dpsi)).sum(-1)
-        out[hi] = np.exp(log_beta) * x[hi] * s
-    return out
+    def c_factor(self, bs, alpha):
+        out1 = beta_function(alpha, self.K - 1)
+        out2 = np.where(bs < 1, out1 / ((1 - bs) ** (self.K - 1)), 0)
+        out = np.where((bs ** (alpha - 1)) > 0, out2 / (bs ** (alpha - 1)), 0)
+        I_func = self.beta_cdfs_derivative[np.argmin(np.abs(alpha - self.alphas))]
+        interp = -np.interp(bs, self.bs, I_func)
+        final = interp * out
+        return final
 
 
 class VectorFieldTable:
     """
-    Tables of C(x, a_s) (dirichlet_c_factor) for the concentrations a_s = 1 + alpha(t_s), s = 0, ..., T - 1, of the
-    sampling grid, on an x-grid dense at both ends of [0, 1]; C is linearly interpolated in x. float64.
+    DirichletConditionalFlow for k classes, covering the concentrations a_s = 1 + alpha(t_s), s = 0, ..., T - 1, of
+    the sampling grid (alpha_max: the largest a_s plus one spacing, so that the nearest tabulated a has a finite
+    difference).
     """
 
-    def __init__(self, noiser, k, n_grid=4096, device='cpu'):
+    def __init__(self, noiser, k, alpha_spacing=0.001):
+        if noiser.schedule == 'sparse':
+            raise NotImplementedError("'vector_field' is derived for the paths Dir(1 + alpha z_1) (schedules 'cosine' "
+                                      "and 'linear'), not for 'sparse'")
         t = torch.arange(noiser.T, dtype=torch.float64) / noiser.T
         a = (1 + noiser.get_concentration(t)).numpy()
-        x = 0.5 * (1 + np.tanh(np.linspace(-12., 12., n_grid - 2)))
-        x = np.concatenate(([0.], x, [1.]))
-        c = np.stack([dirichlet_c_factor(x, a_s, k) for a_s in a])      # (T, G)
-        assert np.isfinite(c).all() and (c >= -1e-10).all()
-        self.x = torch.as_tensor(x, device=device)
-        self.c = torch.as_tensor(c, device=device)
-        self.a = torch.as_tensor(a, device=device)
+        self.flow = DirichletConditionalFlow(K=k, alpha_min=1., alpha_max=float(a.max()) + alpha_spacing,
+                                             alpha_spacing=alpha_spacing)
+        self.a = a
+        self.n_nan = 0      # steps where C had NaNs (set to 0, as with allow_nan_cfactor in the original)
 
     def __call__(self, z, s):
-        """C(z, a_s), z: (...) in [0, 1]."""
-        return BetaQuantileTable._interp(z, self.x, self.c[s])
+        """C(z, a_s), z: (...) tensor; computed in numpy, in the dtype of z."""
+        c = self.flow.c_factor(z.cpu().numpy(), self.a[s])
+        c = torch.from_numpy(np.asarray(c)).to(z)
+        if torch.isnan(c).any():
+            self.n_nan += 1
+            print(f'NAN cfactor: z.min(): {z.min()}')
+            c = torch.nan_to_num(c)
+        return c
 
 
 def vector_field_step(z_t, p_z1, table, s):
     """
-    Euler step of the Dirichlet flow from t_s to t_{s+1} ('original' method of Dirichlet flow matching), in the
+    Euler step of the Dirichlet flow from t_s to t_{s+1}, as the 'original' method of Dirichlet flow matching, in the
     concentration a:
-        z_u = z_t + (a_{s+1} - a_s) sum_i p(z_1 = i | G_t) C(z_{t,i}, a_s) (e_i - z_t),
-    projected onto the simplex when it leaves it (simplex_proj).
+        z_u = z_t + (a_{s+1} - a_s) sum_i p(z_1 = i | G_t) C(z_{t,i}, a_s) (e_i - z_t).
+    As in the original, z_u is not projected onto the simplex (it can leave it with large steps).
 
     Args:
-        z_t: (..., k) points on the simplex. p_z1: (..., k) prediction. table: VectorFieldTable for k classes.
+        z_t: (..., k) points. p_z1: (..., k) prediction. table: VectorFieldTable for k classes.
         s: index of t in the sampling grid (s + 1 < T).
     Returns:
-        (..., k) next points on the simplex, same dtype as z_t.
+        (..., k) next points, same dtype as z_t.
     """
-    z = z_t.double()
-    pc = p_z1.double() * table(z.clamp(0, 1), s)                     # p_i C(z_i, a_s)
-    flow = pc - z * pc.sum(-1, keepdim=True)
-    z_u = z + (table.a[s + 1] - table.a[s]) * flow
-    if (z_u < 0).any():
-        z_u = simplex_proj(z_u)
-    return z_u.to(z_t.dtype)
+    k = z_t.size(-1)
+    eye = torch.eye(k, dtype=z_t.dtype, device=z_t.device)
+    c_factor = table(z_t, s)
+    cond_flows = (eye - z_t.unsqueeze(-1)) * c_factor.unsqueeze(-2)     # (..., k, k), column i: C(z_i) (e_i - z)
+    flow = (p_z1.to(z_t.dtype).unsqueeze(-2) * cond_flows).sum(-1)
+    return z_t + flow * float(table.a[s + 1] - table.a[s])
 
 
-def simplex_proj(z):
-    """Euclidean projection of each z (..., k) onto the simplex (Wang & Carreira-Perpinan, 2013)."""
-    y = z.reshape(-1, z.size(-1))
-    u, _ = torch.sort(y, dim=-1, descending=True)
-    css = u.cumsum(-1) - 1
-    ks = torch.arange(1, y.size(-1) + 1, dtype=y.dtype, device=y.device)
-    rho = ((u - css / ks) > 0).sum(-1, keepdim=True)                 # number of positive entries, >= 1
-    theta = css.gather(-1, rho - 1) / rho.to(y.dtype)
-    return (y - theta).clamp_min(0).view(z.shape)
+def _log(x):
+    return x.clamp_min(1e-300).log()
 
 
-def quantile_maps(z_t, table, s, eps=1e-12):
+def quantile_maps(z_t, table, s):
     """
     The per-class maps of the Dirichlet path from t_s to t_{s+1} (the 'cdf_trick' of Dirichlet flow matching).
-    Conditional on the clean class i, z_t ~ Dir(1 + alpha(t_s) e_i): z_i ~ Beta(1 + alpha(t_s), k - 1) and the other
-    coordinates, renormalized, are uniform on the remaining simplex and independent of z_i. So
-        T_i(z)_i = F_{s+1}^{-1}(F_s(z_i)),    T_i(z)_j = z_j (1 - T_i(z)_i) / (1 - z_i),  j != i,
-    maps Dir(1 + alpha(t_s) e_i) exactly onto Dir(1 + alpha(t_{s+1}) e_i).
+    Conditional on the clean class i, z_t ~ Dir(b_s + (a_s - b_s) e_i): z_i ~ Beta(a_s, (k - 1) b_s) and the other
+    coordinates, renormalized, y = z_{-i} / (1 - z_i) ~ Dir(b_s, ..., b_s), independent of z_i. So
+        T_i(z)_i = F_{s+1}^{-1}(F_s(z_i)),    T_i(z)_{-i} = (1 - T_i(z)_i) S(y),
+    maps Dir(b_s + (a_s - b_s) e_i) exactly onto Dir(b_{s+1} + (a_{s+1} - b_{s+1}) e_i), where S maps
+    Dir(b_s, ..., b_s) onto Dir(b_{s+1}, ..., b_{s+1}): the identity when b = 1 ('cosine' / 'linear'), otherwise
+    ('sparse') the quantile maps of the stick-breaking fractions of y, in the order of the classes (_stick_map).
+    Computed in logit space, with 1 - z_i as the sum of the other coordinates, so that coordinates close to 0 or 1
+    keep their precision.
 
     Args:
         z_t: (..., k) points on the simplex. table: BetaQuantileTable for k classes. s: index of t in the sampling
@@ -390,17 +491,41 @@ def quantile_maps(z_t, table, s, eps=1e-12):
     Returns:
         (..., k_i, k_j) float64, row i is T_i(z_t).
     """
-    z = z_t.double()
-    z_i = z.clamp(eps, 1 - eps)
-    z_i_next = table.ppf(table.cdf(z_i, s), s + 1)                  # (..., k), the coordinate i of T_i
-    maps = z.unsqueeze(-2) * ((1 - z_i_next) / (1 - z_i)).unsqueeze(-1)   # (..., k_i, k_j)
-    maps = maps.clone()
-    diag = torch.arange(z.size(-1), device=z.device)
-    maps[..., diag, diag] = z_i_next
+    z = z_t.double().clamp_min(0)
+    k = z.size(-1)
+    maps = z.new_zeros(z.shape + (k,))
+    for i in range(k):
+        others = [j for j in range(k) if j != i]
+        rest = z[..., others].sum(-1, keepdim=True)                 # 1 - z_i, summed directly (no cancellation)
+        logit_next = table.transport(_log(z[..., i:i + 1]) - _log(rest), s)   # logit of T_i(z)_i
+        y = z[..., others] / rest.clamp_min(1e-300)
+        if table.sticks:
+            y = _stick_map(y, table, s)
+        maps[..., i, others] = torch.sigmoid(-logit_next) * y
+        maps[..., i, i] = torch.sigmoid(logit_next[..., 0])
     return maps
 
 
-def quantile_map(z_t, p_z1, table, s, eps=1e-12):
+def _stick_map(y, table, s):
+    """
+    Maps y ~ Dir(b_s, ..., b_s) (..., m) onto Dir(b_{s+1}, ..., b_{s+1}) through its stick-breaking fractions
+    v_l = y_l / (y_l + ... + y_m) ~ Beta(b, (m - l) b), independent: each is moved by its quantile map (family m - l of
+    the BetaQuantileTable, in logit space: logit v_l = log y_l - log(y_{l+1} + ... + y_m)), the last coordinate takes
+    the rest.
+    """
+    m = y.size(-1)
+    suffix = y.flip(-1).cumsum(-1).flip(-1)                          # suffix[l] = y_l + ... + y_m
+    out = torch.zeros_like(y)
+    rest_next = torch.ones_like(y[..., 0])
+    for l in range(m - 1):
+        logit_next = table.transport(_log(y[..., l]) - _log(suffix[..., l + 1]), s, m - 1 - l)
+        out[..., l] = rest_next * torch.sigmoid(logit_next)
+        rest_next = rest_next * torch.sigmoid(-logit_next)
+    out[..., m - 1] = rest_next
+    return out
+
+
+def quantile_map(z_t, p_z1, table, s):
     """
     Deterministic step of the Dirichlet path from t_s to t_{s+1}: the per-class maps T_i (quantile_maps) averaged
     over the prediction, z_u = sum_i p(z_1 = i | G_t) T_i(z_t).
@@ -411,7 +536,7 @@ def quantile_map(z_t, p_z1, table, s, eps=1e-12):
     Returns:
         (..., k) next points on the simplex, same dtype as z_t.
     """
-    maps = quantile_maps(z_t, table, s, eps)
+    maps = quantile_maps(z_t, table, s)
     z_u = (p_z1.double().unsqueeze(-1) * maps).sum(-2)
     z_u = z_u / z_u.sum(-1, keepdim=True).clamp_min(1e-300)
     return z_u.to(z_t.dtype)
@@ -438,12 +563,12 @@ def partial_resampling(z, conc, rho):
     return G / G.sum(-1, keepdim=True).clamp_min(1e-300)
 
 
-def tuned_step(z_t, p_z1, table, s, lambd, eta, eps=1e-12):
+def tuned_step(z_t, p_z1, table, s, lambd, eta):
     """
     Tuned step of the Dirichlet path from t_s to t_{s+1} ('tuned' of Dirichlet flow matching):
-      1. the per-class quantile maps T_i(z_t) (quantile_maps), each exactly distributed as Dir(1 + alpha(t_{s+1}) e_i)
-         when z_t ~ Dir(1 + alpha(t_s) e_i);
-      2. partial resampling of each T_i(z_t) by M_rho targeting Dir(1 + alpha(t_{s+1}) e_i), rho = 1 - eta
+      1. the per-class quantile maps T_i(z_t) (quantile_maps), each exactly distributed as the path conditional on
+         z_1 = i at t_{s+1}, Dir(b + (a - b) e_i), when z_t is distributed as it at t_s;
+      2. partial resampling of each T_i(z_t) by M_rho targeting that Dirichlet, rho = 1 - eta
          (partial_resampling): eta = 0 keeps the deterministic map, eta = 1 draws a fresh conditional sample;
       3. combination of the k results with weights w:
             lambd < 0 (lambda = infinity): w = p(z_1 | G_t), the average of the maps (with eta = 0: quantile_map),
@@ -455,9 +580,11 @@ def tuned_step(z_t, p_z1, table, s, lambd, eta, eps=1e-12):
     Returns:
         (..., k) next points on the simplex, same dtype as z_t.
     """
-    maps = quantile_maps(z_t, table, s, eps)                                 # (..., k_i, k_j)
+    maps = quantile_maps(z_t, table, s)                                      # (..., k_i, k_j)
     k = maps.size(-1)
-    conc = 1 + (table.a[s + 1] - 1) * torch.eye(k, dtype=maps.dtype, device=maps.device)   # row i: 1 + alpha e_i
+    # row i: the target Dir(b + (a - b) e_i) at t_{s+1}
+    conc = table.b[s + 1] + (table.a[s + 1] - table.b[s + 1]) * torch.eye(k, dtype=maps.dtype, device=maps.device)
+    conc = conc.clamp_min(1e-20)
     maps = partial_resampling(maps, conc, 1. - eta)
     p = p_z1.double()
     if lambd < 0:

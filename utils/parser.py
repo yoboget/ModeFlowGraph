@@ -6,7 +6,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dataset", type=str,
-        default='qm9',
+        default='zinc',
         help="Name of the dataset. Available: qm9, qm9H, zinc, planar, sbm, enzymes"
     )
 
@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./checkpoints/qm9/dirichlet_sufficient_small-nu0v78a0/files/', help="Path to the model directory"
+        default='./checkpoints/zinc/dirichlet6_sufficient-07pvtv3c/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -73,7 +73,7 @@ def parse_args():
 
     parser.add_argument(
         "--nfe", type=int, nargs='+',
-        default=128, help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
+        default=[128], help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
                            "and sample_tuned_sweep.py). Default: model.T of the config"
     )
 
@@ -99,9 +99,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--fast_eval", action=argparse.BooleanOptionalAction,
+        default=False, help="work_type sample: evaluate as during training, i.e. log.n_val_samples graphs against the "
+                            "validation set, without NSPDK and PGD"
+    )
+
+    parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=3, help="prior 'dirichlet': scale of the concentration alpha(t) = -scale log(1 - t) of the path "
-                         "z_t ~ Dir(1 + alpha(t) z_1)"
+        default=4, help="prior 'dirichlet': scale of the schedule, alpha(t) = -scale log(1 - t) ('cosine') or "
+                         "scale t ('linear') in z_t ~ Dir(1 + alpha(t) z_1), the exponent in "
+                         "alpha(t) = 1 - (1 - t)^scale ('sparse')"
     )
 
     parser.add_argument(
@@ -117,8 +124,18 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--schedule", type=str, choices=['cosine', 'linear', 'sparse'],
+        default='sparse', help="Noise schedule. 'cosine': alpha_bar(t) = cos(pi (1 - t) / 2)^c (discrete priors), "
+                               "alpha(t) = -scale log(1 - t) (dirichlet). 'linear': alpha_bar(t) = t (discrete priors), "
+                               "alpha(t) = scale t (dirichlet, alpha_max = 1 + scale as in Dirichlet flow matching). "
+                               "'sparse' (dirichlet only): z_t ~ Dir(alpha(t) z_1 + (1 - alpha(t)) 1) with "
+                               "alpha(t) = 1 - (1 - t)^scale, uniform at t = 0 and exactly z_1 at t = 1 (scale ~2: "
+                               "information about z_1 spread evenly over t; larger: earlier)"
+    )
+
+    parser.add_argument(
         "--schedule_c", type=float,
-        default=2, help="Exponent c of the noise schedule alpha_bar(t) = cos(pi t / 2)^c (2: standard cosine)"
+        default=2, help="Exponent c of the cosine schedule alpha_bar(t) = cos(pi (1 - t) / 2)^c (2: standard cosine)"
     )
 
     parser.add_argument(

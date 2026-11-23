@@ -1,3 +1,4 @@
+from collections import defaultdict
 import time
 
 import torch
@@ -47,6 +48,8 @@ def main() -> None:
                    name=run_name(config))
         times = []
 
+        # --fast_eval: as during training, n_val_samples graphs (see Trainer.eval_samples)
+        n_samples = config.log.n_val_samples if args.fast_eval else config.log.n_samples_generation
         # sweep over the numbers of sampling steps T (--nfe, default: model.T of the config)
         for r in args.nfe or [config.model.T]:
             config.model.T = r
@@ -54,7 +57,7 @@ def main() -> None:
             trainer = Trainer(dataloader, config)
             with torch.no_grad():
                 start_time = time.time()
-                X, A, mask, mask_adj = trainer.sampler(config.log.n_samples_generation, trainer.denoiser,
+                X, A, mask, mask_adj = trainer.sampler(n_samples, trainer.denoiser,
                                                        method=config.sampling.id)
                 sampling_time = time.time() - start_time
                 wandb.log({'sampling_time': sampling_time})
@@ -86,6 +89,7 @@ def main() -> None:
             else:
                 latex_format[key] = f'${mean:.3f} \\pm {std:.3f}$'
 
+        latex_format = defaultdict(lambda: '-', latex_format)   # e.g. no NSPDK with --fast_eval
         if dataset in ['qm9', 'qm9H', 'zinc']:
             print(
                 f'{latex_format["valid"]} &  {latex_format["fcd"]} & {latex_format["nspdk"]} & {latex_format["unique"]} & {latex_format["novel"]} \\')
@@ -126,13 +130,17 @@ def sample_training_graphs(train_set, n, max_num_nodes):
 
 def run_name(config):
     """wandb run name: <prior>_<sampler>_<input>, then the Dirichlet scale (dirichlet prior) or the schedule exponent c
-    (discrete priors), e.g. dirichlet_quantile_map_sufficient_scale6,
+    (discrete priors), with _<schedule> for a schedule other than cosine, e.g. dirichlet_quantile_map_sufficient_scale6,
     dirichlet_tuned_sufficient_lambda-1_eta0.5_scale6 ('tuned': with lambda and eta), marginal_sid_state_c2."""
     name = f'{config.model.prior}_{config.sampling.id}_{config.model.input}'
     if config.sampling.id == 'tuned':
         name = f'{name}_lambda{config.sampling.lambd:g}_eta{config.sampling.eta:g}'
+    if config.model.get('schedule', 'cosine') != 'cosine':
+        name = f"{name}_{config.model.schedule}"
     if config.model.prior == 'dirichlet':
         return f'{name}_scale{config.model.dirichlet_scale:g}'
+    if config.model.get('schedule', 'cosine') == 'linear':
+        return name
     return f'{name}_c{config.model.schedule_c:g}'
 
 
@@ -143,6 +151,7 @@ def update_config(config, dataset, work_type, args):
     config.model.num_modes = args.num_modes
     config.model.hyp_loss = args.hyp_loss
     config.model.hyp_temperature = args.hyp_temperature
+    config.model.schedule = args.schedule
     config.model.schedule_c = args.schedule_c
     config.model.dirichlet_scale = args.dirichlet_scale
     config.model.input = args.input
@@ -154,6 +163,7 @@ def update_config(config, dataset, work_type, args):
     config.sampling.temperature = args.temperature
     config.sampling.lambd = args.lambd
     config.sampling.eta = args.eta
+    config.sampling.fast_eval = args.fast_eval
     config.log.pgd = args.pgd
     return config
 

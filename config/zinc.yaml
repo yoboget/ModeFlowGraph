@@ -16,7 +16,7 @@ model:
   mlp_n_layers: 3
   normalization: layer_norm
   T: 128
-  prior: marginal # 'marginal', 'masking' or 'dirichlet'
+  prior: dirichlet # 'marginal', 'masking' or 'dirichlet'
 
 extra_features:
   spectral_embeddings: False
@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 5
 
 sampling:
-  id: 'sid'
+  id: 'quantile_map'
 
 log:
   n_loggin_steps: 1000

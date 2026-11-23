@@ -65,21 +65,27 @@ def checkpoint_meta(config):
     m = config.model
     return {'prior': m.prior, 'input': m.get('input', 'state'), 'time_input': bool(m.get('time_input', False)),
             'num_modes': m.get('num_modes', 1), 'training_method': m.get('training_method', 'denoiser'),
-            'schedule_c': m.get('schedule_c', 2.), 'dirichlet_scale': m.get('dirichlet_scale', 3.)}
+            'schedule': m.get('schedule', 'cosine'), 'schedule_c': m.get('schedule_c', 2.),
+            'dirichlet_scale': m.get('dirichlet_scale', 3.)}
+
+
+# Value of a key missing from the metadata of older checkpoints
+META_DEFAULTS = {'schedule': 'cosine'}
 
 
 def compatibility_keys(meta):
     """
     What a checkpoint must share with the configuration to be sampled. With input 'sufficient' and no time input,
     the denoiser does not depend on the noising process. Otherwise it gets the noise level as input: the prior must
-    match, and for 'dirichlet' the scale too (the input t means alpha(t) = -scale log(1 - t)). For 'marginal', the
-    input is alpha_bar itself, so schedule_c only changes the sampling grid and may differ.
+    match, and for 'dirichlet' the scale and the schedule too (the input t means alpha(t) = -scale log(1 - t) or
+    scale t). For 'marginal', the input is alpha_bar itself, so the schedule only changes the sampling grid and may
+    differ.
     """
     keys = ['input', 'time_input', 'num_modes', 'training_method']
     if meta['input'] == 'state' or meta['time_input']:
         keys.append('prior')
         if meta['prior'] == 'dirichlet':
-            keys.append('dirichlet_scale')
+            keys += ['dirichlet_scale', 'schedule']
     return keys
 
 
@@ -91,7 +97,8 @@ def check_meta(saved, current, path):
         saved, keys = {'input': 'state'}, ['input']
     else:
         keys = compatibility_keys(current)
-    mismatch = {k: (saved.get(k), current[k]) for k in keys if saved.get(k) != current[k]}
+    mismatch = {k: (saved.get(k, META_DEFAULTS.get(k)), current[k]) for k in keys
+                if saved.get(k, META_DEFAULTS.get(k)) != current[k]}
     if mismatch:
         details = ', '.join(f'{k}: checkpoint {v[0]} vs config {v[1]}' for k, v in mismatch.items())
         raise ValueError(f'{path} was trained with a different setup ({details}).')

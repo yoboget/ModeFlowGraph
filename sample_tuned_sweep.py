@@ -9,7 +9,8 @@ evaluated.
 The numbers of sampling steps T are given by --nfe (utils/parser.py), by default the model.T of the config. The
 sweep arguments are --eta, --lambd, --n_samples (graphs per configuration, default: the config's
 log.n_samples_generation), --seed and --output. Every other argument is passed to main.py's parser (utils/parser.py),
-e.g. --dataset, --denoiser_dir, --dirichlet_scale, --input, --training_method, --temperature, --wandb. sampling.id
+e.g. --dataset, --denoiser_dir, --dirichlet_scale, --input, --training_method, --temperature, --wandb, --fast_eval
+(evaluation as during training: validation reference, no NSPDK / PGD). sampling.id
 is set to 'tuned'.
 
 The dataset is loaded once and the denoiser once per T. Each configuration starts from the same seed, so for a given
@@ -46,7 +47,8 @@ def parse_sweep_args():
     parser.add_argument('--lambd', type=float, nargs='+', default=[0, 0.1, 1, 10, 100, -1],
                         help="'tuned' lambda values (< 0: lambda = infinity)")
     parser.add_argument('--n_samples', type=int, default=None,
-                        help='Graphs per configuration (default: log.n_samples_generation of the config)')
+                        help='Graphs per configuration (default: log.n_samples_generation of the config, '
+                             'log.n_val_samples with --fast_eval)')
     parser.add_argument('--seed', type=int, default=42, help='Seed of every configuration')
     parser.add_argument('--output', type=str, default=None,
                         help='Results JSON (default: ./sweeps/tuned_<dataset>_<run name>.json)')
@@ -86,7 +88,7 @@ def main():
         raise ValueError(f"The 'tuned' sampler needs the 'dirichlet' prior, the config of {args.dataset} has "
                          f"'{config.model.prior}'")
     config.sampling.id = 'tuned'
-    n_samples = sweep.n_samples or config.log.n_samples_generation
+    n_samples = sweep.n_samples or (config.log.n_val_samples if args.fast_eval else config.log.n_samples_generation)
     nfes = args.nfe or [config.model.T]
 
     name = f'{run_name(config)}_sweep'

@@ -65,10 +65,12 @@ class Trainer:
         ### NOISING AND SAMPLING ###
         node_marginals, edge_marginals = get_distribution(self.loaders['train'], config.dataset)
         if self.prior == 'dirichlet':
-            self.noiser = NoiserDirichlet(config.model.T, scale=config.model.get('dirichlet_scale', 3.))
+            self.noiser = NoiserDirichlet(config.model.T, scale=config.model.get('dirichlet_scale', 3.),
+                                           schedule=config.model.get('schedule', 'cosine'))
         else:
             self.noiser = NoiserDense(config.model.T, self.prior, node_marginals, edge_marginals,
-                                      schedule_c=config.model.get('schedule_c', 2.))
+                                      schedule_c=config.model.get('schedule_c', 2.),
+                                      schedule=config.model.get('schedule', 'cosine'))
 
         # Denoiser input: the noisy state, or the sufficient statistics phi (see utils/model_input.py)
         self.model_input = ModelInput(self.noiser, self.extra_features, config.model.get('input', 'state'),
@@ -89,10 +91,12 @@ class Trainer:
                                lambd=config.sampling.get('lambd', -1.), eta=config.sampling.get('eta', 1.),
                                n_edge_types=len(edge_marginals))
 
-        ref_loader = self.loaders['test'] if self.sampling else self.loaders['val']
-        # NSPDK and PGD are slow: computed only when sampling from a trained model, not during training
+        # NSPDK and PGD are slow: computed only when sampling from a trained model, not during training. With
+        # sampling.fast_eval, sampling is evaluated as during training (validation reference, no NSPDK / PGD).
+        full_eval = self.sampling and not config.sampling.get('fast_eval', False)
+        ref_loader = self.loaders['test'] if full_eval else self.loaders['val']
         self.eval_samples = SamplingMetrics(config.dataset, self.max_num_nodes, self.sampling, ref_loader=ref_loader,
-                                            nspdk=self.sampling, pgd=self.sampling and config.log.get('pgd', False))
+                                            nspdk=full_eval, pgd=full_eval and config.log.get('pgd', False))
         self.val_size = config.log.n_val_samples
 
         self.dataset = config.dataset

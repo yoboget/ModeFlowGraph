@@ -38,7 +38,8 @@ With the 'dirichlet' prior (NoiserDirichlet), G_t is a point on the simplex for 
              eta = 0 and lambd < 0 is 'quantile_map'.
     - 'vector_field': the 'original' sampler of Dirichlet flow matching (see utils.noising.vector_field_step), Euler
              steps of the marginal vector field sum_i p(z_1 = i | G_t) C(z_i, a) (e_i - z) in the concentration
-             a = 1 + alpha(t), with the exact C factor, projected onto the simplex when a step leaves it.
+             a = 1 + alpha(t), with the same numerics as the original (finite difference of tabulated Beta CDFs for
+             the C factor, NaNs set to 0, no projection onto the simplex). Not for the schedule 'sparse'.
 
 See utils/noising.py for the dense graph representation and the priors.
 """
@@ -227,8 +228,8 @@ class Sampler:
         """
         if self.edge_field is None:
             if self.has_node_types:
-                self.node_field = VectorFieldTable(self.noiser, self.n_node_types, device=self.device)
-            self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types, device=self.device)
+                self.node_field = VectorFieldTable(self.noiser, self.n_node_types)
+            self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types)
         return self.sample_dirichlet_path(node_mask, vector_field_step, self.node_field, self.edge_field)
 
     def sample_dirichlet_path(self, node_mask, step, node_table=None, edge_table=None):
