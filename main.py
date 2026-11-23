@@ -1,4 +1,6 @@
 from collections import defaultdict
+import json
+import os
 import time
 
 import torch
@@ -60,10 +62,13 @@ def main() -> None:
                 X, A, mask, mask_adj = trainer.sampler(n_samples, trainer.denoiser,
                                                        method=config.sampling.id)
                 sampling_time = time.time() - start_time
-                wandb.log({'sampling_time': sampling_time})
+                wandb.log({'sampling_time': sampling_time, 'nfe': r})
                 times.append(sampling_time)
                 run = trainer.eval_samples(X, A, mask, mask_adj, ema=True)
                 runs.append(run)
+            save_result(results_path(config), result_key(config, r),
+                        {'nfe': r, 'eta': config.sampling.eta, 'lambd': config.sampling.lambd, 'n_samples': n_samples,
+                         'sampling_time': sampling_time, **run})
 
         keys = runs[0].keys()
         latex_format = {}
@@ -126,6 +131,48 @@ def sample_training_graphs(train_set, n, max_num_nodes):
     X, A, mask = batch_to_dense(batch, max_num_nodes=max_num_nodes)
     adj_mask = get_edge_mask(mask)
     return X.argmax(-1) * mask, A.argmax(-1) * adj_mask, mask, adj_mask
+
+
+def results_path(config, root='sweeps'):
+    """JSON file of the sampling results (read by misc/plots.py), same format as sample_tuned_sweep.py:
+    <root>/<sampler>_<dataset>_<schedule>_scale<dirichlet_scale>.json (prior 'dirichlet'), ..._c<schedule_c>.json
+    otherwise, e.g. sweeps/quantile_map_qm9_cosine_scale3.json."""
+    schedule = config.model.get('schedule', 'cosine')
+    if config.model.prior == 'dirichlet':
+        param = f'scale{config.model.dirichlet_scale:g}'
+    else:
+        param = f'c{config.model.schedule_c:g}'
+    return os.path.join(root, f'{config.sampling.id}_{config.dataset}_{schedule}_{param}.json')
+
+
+def result_key(config, nfe):
+    """Key of a configuration in the results file: T<nfe>, with _eta<eta>_lambda<lambd> for 'tuned' (as
+    sample_tuned_sweep.py)."""
+    if config.sampling.id == 'tuned':
+        return f'T{nfe}_eta{config.sampling.eta:g}_lambda{config.sampling.lambd:g}'
+    return f'T{nfe}'
+
+
+def save_result(path, key, result):
+    """Adds (or replaces) results[key] in the JSON file path."""
+    def to_json(v):
+        if isinstance(v, str):
+            return v
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return str(v)
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    results = {}
+    if os.path.isfile(path):
+        with open(path) as f:
+            results = json.load(f)
+    results[key] = {k: to_json(v) for k, v in result.items()}
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(results, f, indent=2)
+    os.replace(tmp, path)
+    print(f'Results saved to {path} ({key})')
 
 
 def run_name(config):

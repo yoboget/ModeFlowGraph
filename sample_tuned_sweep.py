@@ -30,7 +30,7 @@ import yaml
 from easydict import EasyDict as edict
 
 from dataset import get_dataset
-from main import update_config, run_name
+from main import update_config, run_name, results_path
 from trainer import Trainer
 from utils.parser import parse_args
 
@@ -51,7 +51,7 @@ def parse_sweep_args():
                              'log.n_val_samples with --fast_eval)')
     parser.add_argument('--seed', type=int, default=42, help='Seed of every configuration')
     parser.add_argument('--output', type=str, default=None,
-                        help='Results JSON (default: ./sweeps/tuned_<dataset>_<run name>.json)')
+                        help='Results JSON (default: ./sweeps/tuned_<dataset>_<schedule>_scale<scale>.json)')
     sweep_args, rest = parser.parse_known_args()
     sys.argv = sys.argv[:1] + rest
     for eta in sweep_args.eta:
@@ -92,7 +92,7 @@ def main():
     nfes = args.nfe or [config.model.T]
 
     name = f'{run_name(config)}_sweep'
-    output = sweep.output or os.path.join('sweeps', f'tuned_{args.dataset}_{name}.json')
+    output = sweep.output or results_path(config)   # sweeps/tuned_<dataset>_<schedule>_scale<scale>.json
     os.makedirs(os.path.dirname(output) or '.', exist_ok=True)
     results = {}
     if os.path.isfile(output):

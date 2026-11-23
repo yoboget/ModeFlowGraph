@@ -42,6 +42,10 @@ TEST*.xml
 *.mov
 *.wmv
 
+# Apptainer
+*.sif
+/pytorch_sandbox/*
+
 
 # Python bytecode
 __pycache__/
