@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./checkpoints/zinc/dirichlet6_sufficient-07pvtv3c/files/', help="Path to the model directory"
+        default='./checkpoints/zinc/dirichlet6_state-a73worv0/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -79,7 +79,7 @@ def parse_args():
 
     parser.add_argument(
         "--lambd", type=float,
-        default=-1., help="'tuned' sampling ('dirichlet' prior): how the per-class quantile maps are combined. < 0 "
+        default=0., help="'tuned' sampling ('dirichlet' prior): how the per-class quantile maps are combined. < 0 "
                           "(-1, lambda = infinity): average weighted by the prediction p(z_1 | G_t) (deterministic), "
                           "0: one class drawn from p(z_1 | G_t), > 0: Dirichlet(lambda p(z_1 | G_t)) mixing weights"
     )
@@ -113,7 +113,7 @@ def parse_args():
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )

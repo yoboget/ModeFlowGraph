@@ -16,7 +16,9 @@ is set to 'tuned'.
 The dataset is loaded once and the denoiser once per T. Each configuration starts from the same seed, so for a given
 T they share the initial noise and the number of nodes of each graph. The results (metrics, sampling time) are
 written to the JSON file --output after each configuration; configurations already in it are skipped, so rerunning
-the same command resumes the sweep. A summary table is printed at the end (and logged to wandb).
+the same command resumes the sweep. Several sweeps can write to the same file at the same time (e.g. one over eta and
+one over lambda): each write re-reads the file under a lock and merges into it (main.save_results). A summary
+table is printed at the end (and logged to wandb).
 """
 import argparse
 import json
@@ -30,7 +32,7 @@ import yaml
 from easydict import EasyDict as edict
 
 from dataset import get_dataset
-from main import update_config, run_name, results_path
+from main import update_config, run_name, results_path, save_results, to_json
 from trainer import Trainer
 from utils.parser import parse_args
 
@@ -57,15 +59,6 @@ def parse_sweep_args():
     for eta in sweep_args.eta:
         assert 0. <= eta <= 1., f'eta must be in [0, 1], got {eta}'
     return sweep_args
-
-
-def to_json(value):
-    if isinstance(value, str):
-        return value
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return str(value)
 
 
 def key_of(nfe, eta, lambd):
@@ -127,10 +120,9 @@ def main():
                 **{k: to_json(v) for k, v in metrics.items()}}
             wandb.log({'sweep/nfe': nfe, 'sweep/eta': eta, 'sweep/lambd': lambd,
                        'sweep/sampling_time': sampling_time})
-            tmp = output + '.tmp'
-            with open(tmp, 'w') as f:
-                json.dump(results, f, indent=2)
-            os.replace(tmp, output)
+            # merged into the file as it is now: other jobs may write to it at the same time (e.g. an eta sweep
+            # and a lambda sweep), so the file is never rewritten from this job's results only
+            results = save_results(output, {key_of(nfe, eta, lambd): results[key_of(nfe, eta, lambd)]})
 
     # Summary of the requested configurations
     rows = [results[key_of(nfe, eta, lambd)] for nfe in nfes for eta in sweep.eta for lambd in sweep.lambd]

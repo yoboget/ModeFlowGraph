@@ -153,25 +153,41 @@ def result_key(config, nfe):
     return f'T{nfe}'
 
 
-def save_result(path, key, result):
-    """Adds (or replaces) results[key] in the JSON file path."""
-    def to_json(v):
-        if isinstance(v, str):
-            return v
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return str(v)
+def to_json(value):
+    if isinstance(value, str):
+        return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def save_results(path, entries):
+    """Merges `entries` ({key: result}) into the JSON file `path`, keeping the entries already in it (also those
+    written meanwhile by other jobs on the same file: the file is re-read under a lock before each write).
+    Returns the merged results."""
+    import fcntl
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    results = {}
-    if os.path.isfile(path):
-        with open(path) as f:
-            results = json.load(f)
-    results[key] = {k: to_json(v) for k, v in result.items()}
-    tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(results, f, indent=2)
-    os.replace(tmp, path)
+    with open(path + '.lock', 'a') as lock:
+        fcntl.lockf(lock, fcntl.LOCK_EX)     # lockf: fcntl locks, which also work on NFS
+        try:
+            results = {}
+            if os.path.isfile(path):
+                with open(path) as f:
+                    results = json.load(f)
+            results.update({k: {n: to_json(v) for n, v in r.items()} for k, r in entries.items()})
+            tmp = f'{path}.{os.getpid()}.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(results, f, indent=2)
+            os.replace(tmp, path)
+        finally:
+            fcntl.lockf(lock, fcntl.LOCK_UN)
+    return results
+
+
+def save_result(path, key, result):
+    """Adds (or replaces) results[key] in the JSON file path (see save_results)."""
+    save_results(path, {key: result})
     print(f'Results saved to {path} ({key})')
 
 
