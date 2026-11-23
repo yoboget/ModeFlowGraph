@@ -12,7 +12,7 @@ def parse_args():
 
     parser.add_argument(
         "--work_type", type=str,
-        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default='./checkpoints/zinc/dirichlet6_state-a73worv0/files/', help="Path to the model directory"
+        default=None, help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -73,7 +73,7 @@ def parse_args():
 
     parser.add_argument(
         "--nfe", type=int, nargs='+',
-        default=[256, 512, 1024], help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
+        default=[128], help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
                            "and sample_tuned_sweep.py). Default: model.T of the config"
     )
 
@@ -86,7 +86,7 @@ def parse_args():
 
     parser.add_argument(
         "--eta", type=float,
-        default=0.05, help="'tuned' sampling ('dirichlet' prior), in [0, 1]: how much each conditional map is resampled "
+        default=0., help="'tuned' sampling ('dirichlet' prior), in [0, 1]: how much each conditional map is resampled "
                          "from its target Dirichlet. 0: the deterministic quantile map, 1: a fresh conditional sample, "
                          "in between: partial resampling (rho = 1 - eta). eta = 0 with lambd < 0 is 'quantile_map'"
     )
@@ -113,7 +113,7 @@ def parse_args():
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )
