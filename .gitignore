@@ -46,6 +46,8 @@ TEST*.xml
 *.sif
 /pytorch_sandbox/*
 
+# misc
+/misc/*
 
 # Python bytecode
 __pycache__/
