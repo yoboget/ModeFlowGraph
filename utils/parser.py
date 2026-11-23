@@ -106,7 +106,7 @@ def parse_args():
 
     parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=6, help="prior 'dirichlet': scale of the schedule, alpha(t) = -scale log(1 - t) ('cosine') or "
+        default=4, help="prior 'dirichlet': scale of the schedule, alpha(t) = -scale log(1 - t) ('cosine') or "
                          "scale t ('linear') in z_t ~ Dir(1 + alpha(t) z_1), the exponent in "
                          "alpha(t) = 1 - (1 - t)^scale ('sparse')"
     )
@@ -125,7 +125,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule", type=str, choices=['cosine', 'linear', 'sparse'],
-        default='cosine', help="Noise schedule. 'cosine': alpha_bar(t) = cos(pi (1 - t) / 2)^c (discrete priors), "
+        default='sparse', help="Noise schedule. 'cosine': alpha_bar(t) = cos(pi (1 - t) / 2)^c (discrete priors), "
                                "alpha(t) = -scale log(1 - t) (dirichlet). 'linear': alpha_bar(t) = t (discrete priors), "
                                "alpha(t) = scale t (dirichlet, alpha_max = 1 + scale as in Dirichlet flow matching). "
                                "'sparse' (dirichlet only): z_t ~ Dir(alpha(t) z_1 + (1 - alpha(t)) 1) with "

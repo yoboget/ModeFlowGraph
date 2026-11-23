@@ -24,8 +24,8 @@ extra_features:
   graph_size: True
   molecular_feat: False
   cycles: False
-  rrwp: True
-  rrwp_k: 5
+  rrwp: False
+  rrwp_k: 0
 
 sampling:
   id: 'sid' # 'sid', 'quantile_map', 'tuned'
