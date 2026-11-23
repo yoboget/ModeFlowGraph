@@ -73,7 +73,7 @@ def parse_args():
 
     parser.add_argument(
         "--nfe", type=int, nargs='+',
-        default=[128], help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
+        default=[256, 512, 1024], help="Numbers of sampling steps T (NFE) to sample with, e.g. --nfe 32 64 128 (work_type sample "
                            "and sample_tuned_sweep.py). Default: model.T of the config"
     )
 
@@ -86,7 +86,7 @@ def parse_args():
 
     parser.add_argument(
         "--eta", type=float,
-        default=1., help="'tuned' sampling ('dirichlet' prior), in [0, 1]: how much each conditional map is resampled "
+        default=0.05, help="'tuned' sampling ('dirichlet' prior), in [0, 1]: how much each conditional map is resampled "
                          "from its target Dirichlet. 0: the deterministic quantile map, 1: a fresh conditional sample, "
                          "in between: partial resampling (rho = 1 - eta). eta = 0 with lambd < 0 is 'quantile_map'"
     )

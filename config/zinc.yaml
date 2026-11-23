@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 5
 
 sampling:
-  id: 'sid'
+  id: 'tuned' # 'sid', 'quantile_map', 'tuned'
 
 log:
   n_loggin_steps: 1000
