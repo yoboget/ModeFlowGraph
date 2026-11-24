@@ -23,6 +23,7 @@ SCALES="1 2 3 4 5 6"           # dirichlet_scale values, e.g. "1 2 3 4 5 6"
 NFE="128"                      # numbers of sampling steps T, e.g. "32 64 128"
 SAMPLERS="vector_field quantile_map"
 N_SAMPLES="10000"              # graphs per configuration
+VF_PRECISION="float32"         # vector_field C factor: float32 (original DFM, underflows) or float64
 PGD="false"                    # true: also compute the PolyGraph Discrepancy (~15 min per configuration on 10k molecules)
 
 srun apptainer exec --nv graph2.sif python3 ./sample_scale_sweep.py \
@@ -34,5 +35,6 @@ srun apptainer exec --nv graph2.sif python3 ./sample_scale_sweep.py \
     ${NFE:+--nfe ${NFE}} \
     --samplers ${SAMPLERS} \
     --n_samples "${N_SAMPLES}" \
+    --vf_precision "${VF_PRECISION}" \
     $( [ "${PGD}" = "true" ] && echo --pgd || echo --no-pgd ) \
-    --wandb on
+    --wandb no

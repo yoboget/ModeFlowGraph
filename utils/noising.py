@@ -410,9 +410,15 @@ class DirichletConditionalFlow:
         self.K = K
 
     def c_factor(self, bs, alpha):
-        out1 = beta_function(alpha, self.K - 1)
-        out2 = np.where(bs < 1, out1 / ((1 - bs) ** (self.K - 1)), 0)
-        out = np.where((bs ** (alpha - 1)) > 0, out2 / (bs ** (alpha - 1)), 0)
+        # As the original run with NumPy 1.x: the scalars do not change the precision of bs. alpha is a Python
+        # float (the original passes s.item()), B(alpha, K - 1) and the zeros of np.where have the dtype of bs: with
+        # NumPy >= 2 (NEP 50) a float64 scalar would turn the computation into float64 and remove the float32
+        # underflow of bs ** (alpha - 1). The precision is chosen by the caller through the dtype of bs.
+        alpha = float(alpha)
+        zero = bs.dtype.type(0)
+        out1 = bs.dtype.type(beta_function(alpha, self.K - 1))
+        out2 = np.where(bs < 1, out1 / ((1 - bs) ** (self.K - 1)), zero)
+        out = np.where((bs ** (alpha - 1)) > 0, out2 / (bs ** (alpha - 1)), zero)
         I_func = self.beta_cdfs_derivative[np.argmin(np.abs(alpha - self.alphas))]
         interp = -np.interp(bs, self.bs, I_func)
         final = interp * out
@@ -426,7 +432,12 @@ class VectorFieldTable:
     difference).
     """
 
-    def __init__(self, noiser, k, alpha_spacing=0.001):
+    def __init__(self, noiser, k, alpha_spacing=0.001, precision='float32'):
+        """precision: of the computation of C. 'float32' as in the original (the state is float32 at inference),
+        which underflows for small coordinates and large concentrations (C = inf, then NaN states); 'float64'
+        avoids that underflow. Independent of the NumPy version."""
+        assert precision in ('float32', 'float64'), precision
+        self.dtype = np.float32 if precision == 'float32' else np.float64
         if noiser.schedule == 'sparse':
             raise NotImplementedError("'vector_field' is derived for the paths Dir(1 + alpha z_1) (schedules 'cosine' "
                                       "and 'linear'), not for 'sparse'")
@@ -439,8 +450,8 @@ class VectorFieldTable:
         self.n_proj = 0     # points projected back onto the simplex (vector_field_step)
 
     def __call__(self, z, s):
-        """C(z, a_s), z: (...) tensor; computed in numpy, in the dtype of z."""
-        c = self.flow.c_factor(z.cpu().numpy(), self.a[s])
+        """C(z, a_s), z: (...) tensor; computed in numpy, in the precision of the table, returned in the dtype of z."""
+        c = self.flow.c_factor(z.cpu().numpy().astype(self.dtype, copy=False), float(self.a[s]))
         c = torch.from_numpy(np.asarray(c)).to(z)
         if torch.isnan(c).any():
             self.n_nan += 1

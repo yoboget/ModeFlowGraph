@@ -89,6 +89,7 @@ class Trainer:
                                greedy_last_step=config.sampling.get('greedy_last_step', False),
                                temperature=config.sampling.get('temperature', 1.),
                                lambd=config.sampling.get('lambd', -1.), eta=config.sampling.get('eta', 1.),
+                               vf_precision=config.sampling.get('vf_precision', 'float32'),
                                n_edge_types=len(edge_marginals))
 
         # NSPDK and PGD are slow: computed only when sampling from a trained model, not during training. With

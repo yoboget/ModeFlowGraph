@@ -57,7 +57,7 @@ class Sampler:
     def __init__(self, noiser, model_input, num_nodes_distribution, max_num_nodes, n_node_types,
                  batch_size, device, hyp_selection='sample', training_method='denoiser',
                  sampling_method='denoiser', greedy_last_step=False, n_edge_types=None, temperature=1.,
-                 lambd=-1., eta=1.):
+                 lambd=-1., eta=1., vf_precision='float32'):
         """
         Args:
             noiser: NoiserDense, defines the prior, the noise schedule and the number of steps T.
@@ -75,10 +75,13 @@ class Sampler:
             lambd, eta: 'tuned' sampler ('dirichlet' prior), see utils.noising.tuned_step. lambd: combination of the
                 per-class maps (< 0: average weighted by the prediction, 0: one class drawn from it, > 0: Dirichlet
                 weights); eta in [0, 1]: amount of resampling of each map (0: deterministic, 1: full).
+            vf_precision: 'vector_field' sampler, precision of the computation of the C factor (VectorFieldTable):
+                'float32' as the original, 'float64' without its underflow.
         """
         assert 0. <= eta <= 1., f'eta must be in [0, 1], got {eta}'
         self.lambd = lambd
         self.eta = eta
+        self.vf_precision = vf_precision
         assert training_method in PARAMETRIZATIONS and sampling_method in PARAMETRIZATIONS
         self.training_method = training_method
         self.sampling_method = sampling_method
@@ -251,8 +254,8 @@ class Sampler:
             self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
         elif method == 'vector_field':
             if self.has_node_types:
-                self.node_field = VectorFieldTable(self.noiser, self.n_node_types)
-            self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types)
+                self.node_field = VectorFieldTable(self.noiser, self.n_node_types, precision=self.vf_precision)
+            self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types, precision=self.vf_precision)
         else:
             raise ValueError(f'No tables for the sampling method {method}')
 

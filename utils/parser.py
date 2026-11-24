@@ -90,6 +90,12 @@ def parse_args():
                          "from its target Dirichlet. 0: the deterministic quantile map, 1: a fresh conditional sample, "
                          "in between: partial resampling (rho = 1 - eta). eta = 0 with lambd < 0 is 'quantile_map'"
     )
+    parser.add_argument(
+        "--vf_precision", type=str, choices=['float32', 'float64'], default='float32',
+        help="'vector_field' sampler: precision of the C factor. float32 (default): as the original Dirichlet flow "
+             "matching, which underflows for small coordinates at large concentrations (NaN states); float64: "
+             "without that underflow. Independent of the NumPy version"
+    )
 
     parser.add_argument(
         "--pgd", action=argparse.BooleanOptionalAction,

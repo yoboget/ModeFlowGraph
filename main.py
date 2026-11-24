@@ -226,6 +226,7 @@ def update_config(config, dataset, work_type, args):
     config.sampling.temperature = args.temperature
     config.sampling.lambd = args.lambd
     config.sampling.eta = args.eta
+    config.sampling.vf_precision = args.vf_precision
     config.sampling.fast_eval = args.fast_eval
     config.log.pgd = args.pgd
     return config
