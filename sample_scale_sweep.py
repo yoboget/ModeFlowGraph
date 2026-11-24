@@ -127,7 +127,8 @@ def main():
                     synchronize()
                     generation_time = time.time() - start
                     sampling_time = table_time + generation_time
-                    metrics = trainer.eval_samples(X, A, mask, mask_adj, ema=True)
+                    metrics = trainer.eval_samples(X, A, mask, mask_adj, ema=True,
+                                                   invalid=trainer.sampler.nan_graphs)
                 result = {'nfe': nfe, 'scale': scale, 'sampler': sampler, 'denoiser_dir': args.denoiser_dir,
                           'n_samples': n_samples, 'sampling_time': sampling_time, 'table_time': table_time,
                           'generation_time': generation_time, **metrics}
@@ -140,7 +141,7 @@ def main():
                       f'(tables {table_time:.1f} s, generation {generation_time:.1f} s)', flush=True)
 
     # Summary
-    keys = [k for k in ('valid', 'fcd', 'nspdk', 'pgd') if any(k in r for r in summary)]
+    keys = [k for k in ('valid', 'nan_graphs', 'fcd', 'nspdk', 'pgd') if any(k in r for r in summary)]
     header = (f'{"scale":>6} {"T":>5} {"sampler":>13} ' + ' '.join(f'{k:>9}' for k in keys)
               + f' {"tables(s)":>10} {"total(s)":>9}')
     print(header)

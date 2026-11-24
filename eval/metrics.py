@@ -37,19 +37,36 @@ class SamplingMetrics:
             if ref_size is not None:  # the test loader is shuffled
                 self.ref_graphs = self.ref_graphs[:ref_size]
 
-    def __call__(self, X, A, mask, mask_adj, step=None, epoch=None, ema=False):
+    def __call__(self, X, A, mask, mask_adj, step=None, epoch=None, ema=False, invalid=None):
+        """invalid: (n,) bool, graphs to count as invalid whatever their content (Sampler.nan_graphs: graphs whose
+        sampling state became NaN / infinite, whose output is class 0 everywhere). They are left out of every metric
+        computed on the generated graphs and count as invalid; their fraction is reported as nan_graphs."""
         ema_string = '_ema' if ema else ''
+        n = X.size(0)
+        keep = None
+        if invalid is not None and invalid.any():
+            keep = ~invalid.to(X.device)
+            if not keep.any():
+                metrics = {'valid': 0., 'nan_graphs': 1.}
+                print(f'sampling{ema_string}: every graph has a NaN / infinite state', metrics)
+                wandb.log({f'sampling{ema_string}/': metrics}, step=step)
+                return metrics
+            X, A, mask, mask_adj = X[keep], A[keep], mask[keep], mask_adj[keep]
 
         distrib_metric = self.eval_general_stats(X, A, mask, mask_adj)
 
         if self.dataset in ['qm9', 'zinc', 'qm9H']:
-            metrics = self.molecular_metrics((X, A, mask))
+            metrics = self.molecular_metrics((X, A, mask), n_samples=n)
 
         elif self.dataset in ['planar', 'sbm', 'enzymes']:
             gen_graphs = get_networkx_from_dense(X, A, mask)
             metrics = self.generic_graph_metrics(gen_graphs, self.dataset)
+            if keep is not None and 'valid' in metrics:     # fraction over all the graphs, the NaN ones invalid
+                metrics['valid'] = metrics['valid'] * X.size(0) / n
         else:
             raise NotImplementedError('Metrics not implemented for this dataset.')
+        if invalid is not None:
+            metrics['nan_graphs'] = float(invalid.float().mean())
         if not self.sampling:
             metrics['epoch'] = epoch
         wandb.log({f'sampling{ema_string}/': metrics}, step=step)
@@ -58,10 +75,11 @@ class SamplingMetrics:
         print(f'distributions{ema_string}: ', distrib_metric)
         return metrics
 
-    def molecular_metrics(self, gen_graphs):
+    def molecular_metrics(self, gen_graphs, n_samples=None):
+        """n_samples: number of generated graphs, including those left out as invalid (default: all are given)."""
         annots, adjs, mask = gen_graphs
         gen_mols, num_no_correct = gen_mol(annots, adjs, mask, self.dataset)
-        n_samples = annots.size(0)
+        n_samples = n_samples or annots.size(0)
         return mol_metric(gen_mols, self.dataset, num_no_correct / n_samples, n_samples, test_metrics=True,
                           ref_size=self.ref_size, nspdk=self.nspdk, pgd=self.pgd)
 

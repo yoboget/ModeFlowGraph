@@ -114,7 +114,8 @@ def main():
                 start = time.time()
                 X, A, mask, mask_adj = trainer.sampler(n_samples, trainer.denoiser, method='tuned')
                 sampling_time = time.time() - start
-                metrics = trainer.eval_samples(X, A, mask, mask_adj, ema=True)
+                metrics = trainer.eval_samples(X, A, mask, mask_adj, ema=True,
+                                               invalid=trainer.sampler.nan_graphs)
             results[key_of(nfe, eta, lambd)] = {
                 'nfe': nfe, 'eta': eta, 'lambd': lambd, 'n_samples': n_samples, 'sampling_time': sampling_time,
                 **{k: to_json(v) for k, v in metrics.items()}}

@@ -131,7 +131,7 @@ class Trainer:
                 if self.epoch % self.n_logging_epochs == 0:
                     X, A, mask, mask_adj = self.sampler(self.val_size, self.denoiser_ema, method=self.sampling_method)
                     sampling_metrics = self.eval_samples(X, A, mask, mask_adj, step=self.step, epoch=self.epoch,
-                                                         ema=True)
+                                                         ema=True, invalid=self.sampler.nan_graphs)
                     self.save_model((self.denoiser_ema, self.opt), sampling_metrics, ema=True)
 
     def fit(self, batch: Batch, train: bool = True):

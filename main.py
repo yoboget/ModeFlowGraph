@@ -64,7 +64,7 @@ def main() -> None:
                 sampling_time = time.time() - start_time
                 wandb.log({'sampling_time': sampling_time, 'nfe': r})
                 times.append(sampling_time)
-                run = trainer.eval_samples(X, A, mask, mask_adj, ema=True)
+                run = trainer.eval_samples(X, A, mask, mask_adj, ema=True, invalid=trainer.sampler.nan_graphs)
                 runs.append(run)
             save_result(results_path(config), result_key(config, r),
                         {'nfe': r, 'eta': config.sampling.eta, 'lambd': config.sampling.lambd, 'n_samples': n_samples,

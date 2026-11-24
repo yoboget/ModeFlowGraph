@@ -436,6 +436,7 @@ class VectorFieldTable:
                                              alpha_spacing=alpha_spacing)
         self.a = a
         self.n_nan = 0      # steps where C had NaNs (set to 0, as with allow_nan_cfactor in the original)
+        self.n_proj = 0     # points projected back onto the simplex (vector_field_step)
 
     def __call__(self, z, s):
         """C(z, a_s), z: (...) tensor; computed in numpy, in the dtype of z."""
@@ -448,12 +449,31 @@ class VectorFieldTable:
         return c
 
 
+def simplex_proj(seq):
+    """Euclidean projection of the last dimension onto the simplex, as utils/flow_utils.simplex_proj of Dirichlet flow
+    matching (algorithm of https://arxiv.org/abs/1309.1541, Wang and Carreira-Perpinan). NaN rows stay NaN."""
+    Y = seq.reshape(-1, seq.shape[-1])
+    N, K = Y.shape
+    X, _ = torch.sort(Y, dim=-1, descending=True)
+    X_cumsum = torch.cumsum(X, dim=-1) - 1
+    div_seq = torch.arange(1, K + 1, dtype=Y.dtype, device=Y.device)
+    Xtmp = X_cumsum / div_seq.unsqueeze(0)
+    greater_than_Xtmp = (X > Xtmp).sum(dim=1, keepdim=True)
+    row_indices = torch.arange(N, dtype=torch.long, device=Y.device).unsqueeze(1)
+    selected_Xtmp = Xtmp[row_indices, (greater_than_Xtmp - 1).clamp_min(0)]
+    X = torch.max(Y - selected_Xtmp, torch.zeros_like(Y))
+    return X.view(seq.shape)
+
+
 def vector_field_step(z_t, p_z1, table, s):
     """
     Euler step of the Dirichlet flow from t_s to t_{s+1}, as the 'original' method of Dirichlet flow matching, in the
     concentration a:
-        z_u = z_t + (a_{s+1} - a_s) sum_i p(z_1 = i | G_t) C(z_{t,i}, a_s) (e_i - z_t).
-    As in the original, z_u is not projected onto the simplex (it can leave it with large steps).
+        z_u = z_t + (a_{s+1} - a_s) sum_i p(z_1 = i | G_t) C(z_{t,i}, a_s) (e_i - z_t),
+    then, as in the original, the points that left the simplex (a negative coordinate, or a sum off 1 by more than
+    1e-4) are projected back onto it (simplex_proj). The original projects the whole tensor as soon as one point is
+    off; here only those points are (the others are on the simplex already), and the padding rows (z_t = 0, masked
+    by the sampler) are left out. table.n_proj counts the projected points.
 
     Args:
         z_t: (..., k) points. p_z1: (..., k) prediction. table: VectorFieldTable for k classes.
@@ -466,7 +486,13 @@ def vector_field_step(z_t, p_z1, table, s):
     c_factor = table(z_t, s)
     cond_flows = (eye - z_t.unsqueeze(-1)) * c_factor.unsqueeze(-2)     # (..., k, k), column i: C(z_i) (e_i - z)
     flow = (p_z1.to(z_t.dtype).unsqueeze(-2) * cond_flows).sum(-1)
-    return z_t + flow * float(table.a[s + 1] - table.a[s])
+    z_u = z_t + flow * float(table.a[s + 1] - table.a[s])
+    pad = (z_t == 0).all(-1)
+    off = (((z_u.sum(-1) - 1).abs() > 1e-4) | (z_u < 0).any(-1)) & ~pad
+    if off.any():
+        table.n_proj += int(off.sum())
+        z_u = torch.where(off.unsqueeze(-1), simplex_proj(z_u), z_u)
+    return z_u
 
 
 def _log(x):

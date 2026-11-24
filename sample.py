@@ -107,6 +107,11 @@ class Sampler:
             self.node_transitions = MarginalUniformTransition(noiser.node_prior.to(device))
             self.edge_transitions = MarginalUniformTransition(noiser.edge_prior.to(device))
         self.model = None
+        # (n_samples,) bool, CPU: graphs of the last call whose state became NaN / infinite (Dirichlet path samplers,
+        # see sample_dirichlet_path). Their output is meaningless: the evaluation counts them as invalid
+        # (SamplingMetrics, invalid=...)
+        self.nan_graphs = None
+        self._batch_nan = None
 
     @torch.no_grad()
     def __call__(self, n_samples, model, method='sid'):
@@ -131,15 +136,22 @@ class Sampler:
         model.eval()
         self.model = model
 
-        xs, as_, node_masks = [], [], []
+        xs, as_, node_masks, nans = [], [], [], []
         for start in range(0, n_samples, self.batch_size):
             print(f'Sampling graphs {start} to {min(start + self.batch_size, n_samples)} with {method}...')
             node_mask = self.sample_node_mask(min(self.batch_size, n_samples - start))
+            self._batch_nan = None
             x, a = samplers[method](node_mask)
             xs.append(x)
             as_.append(a)
             node_masks.append(node_mask)
+            nans.append(self._batch_nan.cpu() if self._batch_nan is not None
+                        else torch.zeros(node_mask.size(0), dtype=torch.bool))
         model.train(was_training)
+        self.nan_graphs = torch.cat(nans)
+        if self.nan_graphs.any():
+            print(f'WARNING: {int(self.nan_graphs.sum())} / {n_samples} graphs with a NaN / infinite state '
+                  f'({method}): counted as invalid by the evaluation')
 
         x, a, node_mask = torch.cat(xs), torch.cat(as_), torch.cat(node_masks)
         adj_mask = get_edge_mask(node_mask)
@@ -255,9 +267,19 @@ class Sampler:
         adj_mask = get_edge_mask(node_mask)
         x_t, a_t = self.sample_prior(node_mask)
 
+        def non_finite(x, a):   # (bs,) graphs with a NaN / infinite value in a real node / edge (not the padding)
+            bad_x = (~torch.isfinite(x)).any(-1) & node_mask
+            bad_a = (~torch.isfinite(a)).any(-1) & adj_mask.bool()
+            return bad_x.any(1) | bad_a.flatten(1).any(1)
+
+        # graphs whose state or prediction became NaN / infinite at some step (e.g. 'vector_field' when C overflows);
+        # the argmax of a NaN prediction is class 0 everywhere, so they are flagged (Sampler.nan_graphs)
+        nan = torch.zeros(node_mask.size(0), dtype=torch.bool, device=node_mask.device)
         for k in range(self.T):
             p_x1, p_a1 = self.predict_clean_graph(x_t, a_t, node_mask, self.noiser.get_alpha_bar(k / self.T))
+            nan |= non_finite(x_t, a_t) | non_finite(p_x1, p_a1)
             if k == self.T - 1:
+                self._batch_nan = nan
                 x_1 = self.draw_nodes(p_x1, node_mask, last=True) if self.has_node_types else x_t
                 return x_1, self.draw_edges(p_a1, adj_mask, last=True)
 
