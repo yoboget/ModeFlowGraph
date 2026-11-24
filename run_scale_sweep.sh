@@ -37,4 +37,4 @@ srun apptainer exec --nv graph2.sif python3 ./sample_scale_sweep.py \
     --n_samples "${N_SAMPLES}" \
     --vf_precision "${VF_PRECISION}" \
     $( [ "${PGD}" = "true" ] && echo --pgd || echo --no-pgd ) \
-    --wandb no
+    --wandb on
