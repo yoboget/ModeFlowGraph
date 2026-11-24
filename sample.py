@@ -227,10 +227,22 @@ class Sampler:
         prediction p(z_1 | G_t), or its argmax with greedy_last_step.
         """
         if self.edge_field is None:
+            self.build_tables('vector_field')
+        return self.sample_dirichlet_path(node_mask, vector_field_step, self.node_field, self.edge_field)
+
+    def build_tables(self, method):
+        """(Re)builds the tables of a Dirichlet sampler for the current noiser and T: the Beta quantile tables
+        ('quantile_map', 'tuned') or the vector field tables ('vector_field'). Otherwise built on the first call."""
+        if method in ('quantile_map', 'tuned'):
+            if self.has_node_types:
+                self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
+            self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
+        elif method == 'vector_field':
             if self.has_node_types:
                 self.node_field = VectorFieldTable(self.noiser, self.n_node_types)
             self.edge_field = VectorFieldTable(self.noiser, self.n_edge_types)
-        return self.sample_dirichlet_path(node_mask, vector_field_step, self.node_field, self.edge_field)
+        else:
+            raise ValueError(f'No tables for the sampling method {method}')
 
     def sample_dirichlet_path(self, node_mask, step, node_table=None, edge_table=None):
         """Steps z_u = step(z_t, p(z_1 | G_t), table, k) along the Dirichlet path, elementwise for the nodes and the
@@ -238,9 +250,7 @@ class Sampler:
         the quantile tables (BetaQuantileTable)."""
         if edge_table is None:   # quantile maps
             if self.edge_table is None:
-                if self.has_node_types:
-                    self.node_table = BetaQuantileTable(self.noiser, self.n_node_types, device=self.device)
-                self.edge_table = BetaQuantileTable(self.noiser, self.n_edge_types, device=self.device)
+                self.build_tables('quantile_map')
             node_table, edge_table = self.node_table, self.edge_table
         adj_mask = get_edge_mask(node_mask)
         x_t, a_t = self.sample_prior(node_mask)
