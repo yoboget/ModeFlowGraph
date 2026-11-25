@@ -7,7 +7,8 @@ evaluated.
         --nfe 32 64 128 --eta 0 0.05 0.25 0.5 0.75 1 --lambd 0 0.1 1 10 100 -1
 
 The numbers of sampling steps T are given by --nfe (utils/parser.py), by default the model.T of the config. The
-sweep arguments are --eta, --lambd, --n_samples (graphs per configuration, default: the config's
+sweep arguments are --eta, --lambd, --diagonal (only lambda = eta for each --eta value: --eta 0 0.05 0.25 0.5 0.75 1
+--diagonal), --n_samples (graphs per configuration, default: the config's
 log.n_samples_generation), --seed and --output. Every other argument is passed to main.py's parser (utils/parser.py),
 e.g. --dataset, --denoiser_dir, --dirichlet_scale, --input, --training_method, --temperature, --wandb, --fast_eval
 (evaluation as during training: validation reference, no NSPDK / PGD). sampling.id
@@ -48,6 +49,8 @@ def parse_sweep_args():
                         help="'tuned' eta values, in [0, 1]")
     parser.add_argument('--lambd', type=float, nargs='+', default=[0, 0.1, 1, 10, 100, -1],
                         help="'tuned' lambda values (< 0: lambda = infinity)")
+    parser.add_argument('--diagonal', action='store_true',
+                        help='Sample only the configurations lambda = eta, for each --eta value (--lambd ignored)')
     parser.add_argument('--n_samples', type=int, default=None,
                         help='Graphs per configuration (default: log.n_samples_generation of the config, '
                              'log.n_val_samples with --fast_eval)')
@@ -58,6 +61,8 @@ def parse_sweep_args():
     sys.argv = sys.argv[:1] + rest
     for eta in sweep_args.eta:
         assert 0. <= eta <= 1., f'eta must be in [0, 1], got {eta}'
+    sweep_args.pairs = ([(eta, eta) for eta in sweep_args.eta] if sweep_args.diagonal else
+                        [(eta, lambd) for eta in sweep_args.eta for lambd in sweep_args.lambd])
     return sweep_args
 
 
@@ -95,12 +100,11 @@ def main():
 
     wandb.init(project=f'ModeFlowGraph_{args.dataset}_sample', config=config, mode=args.wandb, name=name)
     dataloader = get_dataset(config)
-    n_configs = len(nfes) * len(sweep.eta) * len(sweep.lambd)
+    n_configs = len(nfes) * len(sweep.pairs)
     done = 0
     for nfe in nfes:
-        todo = [(eta, lambd) for eta in sweep.eta for lambd in sweep.lambd
-                if key_of(nfe, eta, lambd) not in results]
-        done += len(sweep.eta) * len(sweep.lambd) - len(todo)
+        todo = [(eta, lambd) for eta, lambd in sweep.pairs if key_of(nfe, eta, lambd) not in results]
+        done += len(sweep.pairs) - len(todo)
         if not todo:
             continue
         config.model.T = nfe
@@ -126,7 +130,7 @@ def main():
             results = save_results(output, {key_of(nfe, eta, lambd): results[key_of(nfe, eta, lambd)]})
 
     # Summary of the requested configurations
-    rows = [results[key_of(nfe, eta, lambd)] for nfe in nfes for eta in sweep.eta for lambd in sweep.lambd]
+    rows = [results[key_of(nfe, eta, lambd)] for nfe in nfes for eta, lambd in sweep.pairs]
     keys = [k for k in SUMMARY_KEYS.get(args.dataset, GENERIC_KEYS) if k in rows[0]] + ['sampling_time']
     header = f'{"T":>5} {"eta":>6} {"lambda":>7} ' + ' '.join(f'{k:>13}' for k in keys)
     print(header)
