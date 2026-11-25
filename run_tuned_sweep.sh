@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task 1
 #SBATCH --mem=32000
 #SBATCH --partition shared-gpu,public-gpu
+#SBATCH --exclude=<v100_node_list>
 
 #SBATCH --time 12:00:00
 
