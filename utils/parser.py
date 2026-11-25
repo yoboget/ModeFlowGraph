@@ -12,7 +12,7 @@ def parse_args():
 
     parser.add_argument(
         "--work_type", type=str,
-        default='train', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
+        default='sample', help="Options: train, sample, or train_vs_test (metrics of n_samples_generation "
                               "training graphs against as many test graphs)"
     )
 
@@ -23,7 +23,7 @@ def parse_args():
 
     parser.add_argument(
         "--denoiser_dir", type=str,
-        default=None, help="Path to the model directory"
+        default='/checkpoints/dirichlet6_state-a73worv0/files/', help="Path to the model directory"
     )
 
     parser.add_argument(
@@ -112,14 +112,14 @@ def parse_args():
 
     parser.add_argument(
         "--dirichlet_scale", type=float,
-        default=4, help="prior 'dirichlet': scale of the schedule, alpha(t) = -scale log(1 - t) ('cosine') or "
+        default=6, help="prior 'dirichlet': scale of the schedule, alpha(t) = -scale log(1 - t) ('cosine') or "
                          "scale t ('linear') in z_t ~ Dir(1 + alpha(t) z_1), the exponent in "
                          "alpha(t) = 1 - (1 - t)^scale ('sparse')"
     )
 
     parser.add_argument(
         "--input", type=str, choices=['state', 'sufficient'],
-        default='sufficient', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
+        default='state', help="Denoiser input: the noisy 'state' with the noise level, or the 'sufficient' statistics "
                               "phi(z_t, t)_b ∝ q(z_t | z_1 = b) of each node / edge, the same for every noising process "
                               "(see utils/model_input.py)"
     )
@@ -131,7 +131,7 @@ def parse_args():
 
     parser.add_argument(
         "--schedule", type=str, choices=['cosine', 'linear', 'sparse'],
-        default='sparse', help="Noise schedule. 'cosine': alpha_bar(t) = cos(pi (1 - t) / 2)^c (discrete priors), "
+        default='cosine', help="Noise schedule. 'cosine': alpha_bar(t) = cos(pi (1 - t) / 2)^c (discrete priors), "
                                "alpha(t) = -scale log(1 - t) (dirichlet). 'linear': alpha_bar(t) = t (discrete priors), "
                                "alpha(t) = scale t (dirichlet, alpha_max = 1 + scale as in Dirichlet flow matching). "
                                "'sparse' (dirichlet only): z_t ~ Dir(alpha(t) z_1 + (1 - alpha(t)) 1) with "
