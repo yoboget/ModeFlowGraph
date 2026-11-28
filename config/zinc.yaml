@@ -28,7 +28,7 @@ extra_features:
   rrwp_k: 5
 
 sampling:
-  id: 'vector_field' # 'sid', 'quantile_map', 'vector_field', 'tuned'
+  id: 'sid' # 'sid', 'quantile_map', 'vector_field', 'tuned'
 
 log:
   n_loggin_steps: 1000
